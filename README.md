@@ -97,7 +97,7 @@ docs-oficiais/ XSDs v1.01 e planilhas oficiais
 
 O workflow `.github/workflows/build.yml` faz o seguinte:
 - **A cada push na `main`:** roda os testes, gera o instalador Windows (em `windows-latest`) e o APK Android, e publica os artefatos na aba *Actions*.
-- **Ao criar uma tag `vX.Y.Z`** (por exemplo, `git tag v1.0.1 && git push --tags`): também cria uma **Release** com os arquivos, já com a versão da tag.
+- **Nova versão:** aumente `version` no `package.json` (por exemplo, `npm version patch`) e envie para a `main`. O Actions cria a tag `vX.Y.Z` e a **Release** com o instalador Windows e o APK. Enviar uma tag `vX.Y.Z` manualmente também funciona.
 
 Segredos opcionais (*Settings → Secrets and variables → Actions*):
 
