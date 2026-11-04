@@ -1,5 +1,5 @@
 node_modules/
-data/
+/data/
 dist/
 mobile/www/
 mobile/src/entrada.js
