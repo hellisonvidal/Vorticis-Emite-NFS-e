@@ -128,8 +128,27 @@ CREATE TABLE IF NOT EXISTS auditoria (
 
 const normaliza = p => p.map(v => (v === undefined ? null : typeof v === 'boolean' ? (v ? 1 : 0) : v));
 
+// Colunas acrescentadas após a versão 1.0.0 (aplicadas automaticamente em bancos existentes)
+const MIGRACOES = [
+  ['certificados', 'cadeia', "TEXT DEFAULT '{}'"],
+  ['notas', 'origem', "TEXT DEFAULT 'app'"],
+  ['contribuintes', 'ultimo_nsu', 'INTEGER DEFAULT 0'],
+  ['contribuintes', 'sincronizado_em', 'TEXT'],
+  ['procuracoes', 'sistemas', 'TEXT'],
+  ['procuracoes', 'verificada_em', 'TEXT'],
+  ['procuracoes', 'fonte_validade', "TEXT DEFAULT 'manual'"],
+];
+
 export function iniciarBanco(db) {
   db.exec(SCHEMA);
+  db.exec(`CREATE TABLE IF NOT EXISTS configuracoes (
+    usuario_id INTEGER NOT NULL, chave TEXT NOT NULL, valor TEXT, PRIMARY KEY (usuario_id, chave));
+  CREATE INDEX IF NOT EXISTS ix_notas_dps ON notas(contribuinte_id, serie, ndps);
+  CREATE INDEX IF NOT EXISTS ix_notas_chave ON notas(chave_acesso);`);
+  for (const [tabela, coluna, def] of MIGRACOES) {
+    const cols = db.prepare(`PRAGMA table_info(${tabela})`).all().map(c => c.name);
+    if (!cols.includes(coluna)) db.exec(`ALTER TABLE ${tabela} ADD COLUMN ${coluna} ${def}`);
+  }
   return db;
 }
 

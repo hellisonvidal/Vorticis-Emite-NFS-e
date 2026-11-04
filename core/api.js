@@ -7,10 +7,13 @@
 //   resposta = { status, json } | { status, arquivo: { nome, tipo, dados: Uint8Array|string, inline } }
 import { iniciarBanco } from './banco.js';
 import { hashSenha, conferirSenha, novoToken, unb64 } from './seguranca.js';
-import { lerPfx, resumoCert } from './certificado.js';
+import { lerPfx, resumoCert, completarCadeia } from './certificado.js';
 import { calcular, sugerirRetencoes, REGIMES, REG_ESP_TRIB, ALIQ_IBSCBS } from './tributos.js';
-import { montarDPS, montarCancelamento, assinar, chaveSimulada, nfseSimulada, dataHoraBR } from './dps.js';
-import { criarSefin } from './sefin.js';
+import { montarDPS, montarCancelamento, assinar, chaveSimulada, nfseSimulada, dataHoraBR, idDPS } from './dps.js';
+import { criarSefin, decodificarXml } from './sefin.js';
+import { gerarDANFSe } from './danfse.js';
+import { resumoNFSe } from './xml.js';
+import { criarIntegraContador, procuracaoNFSe } from './integra-contador.js';
 import { T, buscar, sugestoes, nomeMunicipio, MUN, CTRIB, NBS } from './tabelas.js';
 import { so, docValido, validarEmissao } from './validacao.js';
 
@@ -18,6 +21,7 @@ export const APP_NOME = 'Vorticis Emite NFS';
 
 class ErroUsuario extends Error { constructor(msg, status = 400, extra) { super(msg); this.status = status; this.extra = extra; } }
 const falha = (msg, status, extra) => { throw new ErroUsuario(msg, status, extra); };
+const fmtDocTxt = d => { const x = so(d); return x.length === 14 ? x.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5') : x.length === 11 ? x.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4') : d; };
 const json = (v, def = {}) => { try { return v ? JSON.parse(v) : def; } catch { return def; } };
 
 export function criarApi(P) {
@@ -71,9 +75,29 @@ export function criarApi(P) {
     if (!s || s.expira_em < new Date().toISOString()) falha('Sessão expirada. Faça login novamente.', 401);
     return { id: s.usuario_id, nome: s.nome, email: s.email, documento: s.documento, metodo: s.metodo };
   }
+  // Baixa um arquivo público (ex.: AC intermediária via AIA) usando o transporte da plataforma
+  async function baixar(url) {
+    const r = await P.http({ url, method: 'GET', headers: { Accept: '*/*' }, publico: true });
+    if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+    return r.body;
+  }
+  // Completa a cadeia ICP-Brasil (AIA) quando o .pfx traz só o certificado do titular
+  async function prepararPfx(bytes, senha, info) {
+    let cadeia = { completa: info.cadeiaCompleta, icp: info.cadeiaICP, niveis: info.cadeiaNiveis, raiz: info.cadeiaRaiz };
+    if (info.cadeiaCompleta) return { bytes, cadeia };
+    try {
+      const r = await completarCadeia(bytes, senha || '', baixar);
+      cadeia = { completa: r.completa, icp: r.icp, niveis: r.niveis, raiz: r.raiz, aviso: r.aviso, complementada: r.alterado };
+      return { bytes: r.pfx, cadeia };
+    } catch (e) {
+      return { bytes, cadeia: { ...cadeia, aviso: `Não foi possível completar a cadeia: ${e.message}` } };
+    }
+  }
   async function guardarCertificado(uid, bytes, senha, info, apelido) {
-    return db.prepare(`INSERT INTO certificados (usuario_id, apelido, titular, documento, tipo_doc, emissor, serial, valido_de, valido_ate, pfx_enc, senha_enc) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(uid, apelido || info.titular, info.titular, info.documento, info.tipo_doc, info.emissor, info.serial, info.valido_de, info.valido_ate, await P.cofre.encrypt(bytes), await P.cofre.encrypt(senha || '')).lastInsertRowid;
+    const prep = await prepararPfx(bytes, senha, info);
+    return db.prepare(`INSERT INTO certificados (usuario_id, apelido, titular, documento, tipo_doc, emissor, serial, valido_de, valido_ate, pfx_enc, senha_enc, cadeia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(uid, apelido || info.titular, info.titular, info.documento, info.tipo_doc, info.emissor, info.serial, info.valido_de, info.valido_ate,
+        await P.cofre.encrypt(prep.bytes), await P.cofre.encrypt(senha || ''), JSON.stringify(prep.cadeia)).lastInsertRowid;
   }
   async function carregarCertificado(id, uid) {
     const row = db.prepare('SELECT * FROM certificados WHERE id = ? AND usuario_id = ?').get(id, uid);
@@ -207,6 +231,12 @@ export function criarApi(P) {
     for (const k of ['documento', 'cep', 'im', 'cod_municipio']) if (o[k] !== undefined) o[k] = so(o[k]);
     if (o.ibscbs_ativo !== undefined) o.ibscbs_ativo = o.ibscbs_ativo ? 1 : 0;
     if (o.certificado_id === '') o.certificado_id = null;
+    if (o.serie_dps !== undefined) {
+      const n = +so(o.serie_dps);
+      if (!(n >= 1 && n <= 49999)) falha('Série da DPS deve estar entre 00001 e 49999 (faixa de aplicativo próprio – E0010). Use uma série diferente em cada instalação (ex.: Windows 00001, Android 00002).');
+      o.serie_dps = String(n).padStart(5, '0');
+    }
+    if (o.prox_ndps !== undefined && !(+o.prox_ndps >= 1)) falha('Próximo número da DPS inválido.');
     return o;
   }
   GET('/api/contribuintes', ({ user }) => db.prepare('SELECT * FROM contribuintes WHERE usuario_id = ? ORDER BY razao_social').all(user.id).map(exibirContrib));
@@ -384,31 +414,59 @@ export function criarApi(P) {
     try { cred = await credencial(uid, c, acesso.procuracao_id); } catch (e) { if (!simulacao) throw e; }
     if (!simulacao && !cred.cert) falha('Para emitir em homologação/produção é necessário um certificado digital A1 do emitente ou de um procurador com procuração cadastrada.');
 
-    const nDPS = tx(() => {
+    // Reserva o número da DPS. Em homologação/produção confirma na Sefin (HEAD /dps/{id}) que o número
+    // ainda não foi usado (ex.: outra instalação com a mesma série) para não perder a sequência (E0014).
+    const reservar = () => tx(() => {
       const atual = db.prepare('SELECT prox_ndps FROM contribuintes WHERE id = ?').get(c.id).prox_ndps;
-      db.prepare('UPDATE contribuintes SET prox_ndps = ? WHERE id = ?').run(atual + 1, c.id);
-      return atual;
+      const usadoLocal = db.prepare("SELECT MAX(ndps) m FROM notas WHERE contribuinte_id = ? AND serie = ? AND ambiente = ? AND status <> 'rascunho'").get(c.id, c.serie_dps, c.ambiente).m || 0;
+      const n = Math.max(atual, usadoLocal + 1);
+      db.prepare('UPDATE contribuintes SET prox_ndps = ? WHERE id = ?').run(n + 1, c.id);
+      return n;
     });
+    const idDe = n => montarDPS({ contrib: c, tomador: t, form: f, calc, serie: c.serie_dps, nDPS: n, ambiente: c.ambiente }).id;
+    let nDPS = reservar();
+    const avisosSeq = [];
+    if (!simulacao) {
+      for (let tent = 0; tent < 30; tent++) {
+        let existe = false;
+        try { existe = await sefin.existeDPS(c.ambiente, cred.cert, idDe(nDPS)); } catch { break; } // sem resposta: segue e trata E0014 no envio
+        if (!existe) break;
+        avisosSeq.push(nDPS);
+        nDPS = reservar();
+      }
+      if (avisosSeq.length) audit(uid, 'sequencia.pulo', `DPS já usadas na Sefin: ${avisosSeq.join(', ')}`);
+    }
     const subst = body.substituir ? { chave: body.substituir.chave, motivo: body.substituir.motivo, xMotivo: body.substituir.xMotivo } : null;
     const { xml, id, dhEmi, tpAmb } = montarDPS({ contrib: c, tomador: t, form: f, calc, serie: c.serie_dps, nDPS, ambiente: c.ambiente, subst });
     const xmlAssinado = cred.cert ? assinar(xml, 'infDPS', cred.cert, json(c.config).assinatura) : xml;
 
     let status, chave = null, nNFSe = null, xmlNFSe = null, resposta = null, mensagens = [], dhProc = null;
+    if (avisosSeq.length) mensagens.push({ codigo: 'SEQ', descricao: `Número(s) de DPS ${avisosSeq.join(', ')} já utilizado(s) na Sefin (série ${c.serie_dps}); a DPS foi emitida com o nº ${nDPS}.` });
     if (simulacao) {
       const seq = db.prepare("SELECT COUNT(*) n FROM notas WHERE contribuinte_id = ? AND ambiente = 'simulacao' AND chave_acesso IS NOT NULL").get(c.id).n + 1;
       nNFSe = String(seq);
       chave = chaveSimulada({ cMun: c.cod_municipio, tipoDoc: c.tipo_doc, doc: c.documento, nNFSe: seq });
       xmlNFSe = nfseSimulada({ chave, nNFSe, dpsAssinada: xmlAssinado, contrib: c, calc, municipio: nomeMunicipio(c.cod_municipio) });
       status = 'autorizada'; dhProc = dataHoraBR();
-      mensagens = [{ codigo: 'SIM', descricao: 'Nota gerada em modo SIMULAÇÃO: sem validade fiscal, nada foi enviado à Receita/Sefin.' }];
+      mensagens.push({ codigo: 'SIM', descricao: 'Nota gerada em modo SIMULAÇÃO: sem validade fiscal, nada foi enviado à Receita/Sefin.' });
     } else {
-      const r = await sefin.emitirNFSe(c.ambiente, cred.cert, xmlAssinado);
-      resposta = r.bruto;
+      let r;
+      try { r = await sefin.emitirNFSe(c.ambiente, cred.cert, xmlAssinado); } catch (e) {
+        // Sem resposta (queda de rede/timeout): a DPS pode ter sido processada. Fica PENDENTE e é conferida pelo id da DPS.
+        r = { ok: false, pendente: true, erros: [{ codigo: 'COM', descricao: `${e.message}. A nota ficou PENDENTE: use "Consultar Sefin" para confirmar se foi autorizada (não reenvie com outro número).` }] };
+      }
+      resposta = r.bruto || null;
+      if (!r.ok && r.duplicada) {
+        // E0014: esta DPS já gerou NFS-e (ex.: resposta perdida num envio anterior) -> recupera a nota autorizada
+        const d = await sefin.consultarDPS(c.ambiente, cred.cert, id).catch(() => ({ ok: false }));
+        const n = d.ok && d.chave ? await sefin.consultarNFSe(c.ambiente, cred.cert, d.chave).catch(() => ({ ok: false })) : { ok: false };
+        if (n.ok) r = { ok: true, chave: d.chave, xmlNFSe: n.xml, recuperada: true, alertas: [{ codigo: 'E0014', descricao: 'DPS já processada anteriormente: NFS-e recuperada da Sefin Nacional.' }] };
+      }
       if (r.ok) {
-        status = 'autorizada'; chave = r.chave; xmlNFSe = r.xmlNFSe; dhProc = r.dhProc;
+        status = 'autorizada'; chave = r.chave; xmlNFSe = r.xmlNFSe; dhProc = r.dhProc || dataHoraBR();
         nNFSe = (xmlNFSe.match(/<nNFSe>(\d+)<\/nNFSe>/) || [])[1] || null;
-        mensagens = (r.alertas || []).map(a => ({ codigo: a.Codigo || a.codigo, descricao: a.Descricao || a.descricao }));
-      } else { status = 'rejeitada'; mensagens = r.erros; }
+        mensagens.push(...(r.alertas || []).map(a => ({ codigo: a.Codigo || a.codigo, descricao: a.Descricao || a.descricao })));
+      } else { status = r.pendente ? 'pendente' : 'rejeitada'; mensagens.push(...r.erros); }
     }
     const ib = calc.ibscbs || {};
     const vals = {
@@ -431,7 +489,9 @@ export function criarApi(P) {
     if (status === 'autorizada' && subst?.chave) db.prepare("UPDATE notas SET status = 'substituida' WHERE chave_acesso = ? AND usuario_id = ?").run(subst.chave, uid);
     audit(uid, 'nota.emitir', `${status} ${chave || id} via ${cred.via}`);
     const out = { id: notaId, status, chave, nNFSe, mensagens, idDps: id, tpAmb };
-    return status === 'rejeitada' ? { __status: 422, ...out, erro: 'NFS-e rejeitada pela Sefin Nacional.', erros: mensagens } : out;
+    if (status === 'rejeitada') return { __status: 422, ...out, erro: 'NFS-e rejeitada pela Sefin Nacional.', erros: mensagens };
+    if (status === 'pendente') return { __status: 202, ...out, erro: 'Sem resposta da Sefin Nacional: nota PENDENTE de confirmação.', erros: mensagens };
+    return out;
   });
 
   const FILTROS = (q, uid) => {
@@ -486,14 +546,12 @@ export function criarApi(P) {
     if (!xml) falha('XML indisponível.', 404);
     return { arquivo: { nome: `${tipo.toUpperCase()}-${n.chave_acesso || n.id_dps || n.id}.xml`, tipo: 'application/xml', dados: xml.startsWith('<?xml') ? xml : `<?xml version="1.0" encoding="UTF-8"?>${xml}` } };
   });
-  GET('/api/notas/:id/danfse', async ({ user, params }) => {
+  // DANFSe v2.0 gerado localmente a partir do XML (NT 008/2026: a API oficial foi suspensa em 03/08/2026)
+  GET('/api/notas/:id/danfse', ({ user, params }) => {
     const n = nota(user.id, params.id);
-    if (n.ambiente === 'simulacao' || !n.chave_acesso) falha('DANFSe oficial disponível apenas para notas autorizadas na Sefin. Use o espelho para impressão.', 404);
-    const c = contribuinte(user.id, n.contribuinte_id);
-    const cred = await credencial(user.id, c, n.procuracao_id, 'consulta');
-    const r = await sefin.baixarDANFSe(n.ambiente, cred.cert, n.chave_acesso);
-    if (!r.ok) falha('Não foi possível obter o DANFSe no ADN.', 502, { erros: r.erros });
-    return { arquivo: { nome: `DANFSe-${n.chave_acesso}.pdf`, tipo: 'application/pdf', dados: r.pdf, inline: true } };
+    if (!n.xml_nfse) falha('DANFSe disponível apenas para notas autorizadas (com XML da NFS-e).', 404);
+    const html = gerarDANFSe(n.xml_nfse, { situacao: n.status, simulacao: n.ambiente === 'simulacao' });
+    return { html, nome: `DANFSe-${n.chave_acesso || n.id}.html` };
   });
   POST('/api/notas/:id/sincronizar', async ({ user, params }) => {
     const n = nota(user.id, params.id);
@@ -501,16 +559,23 @@ export function criarApi(P) {
     const c = contribuinte(user.id, n.contribuinte_id);
     const cred = await credencial(user.id, c, n.procuracao_id, 'consulta');
     let chave = n.chave_acesso;
-    if (!chave && n.id_dps) { const d = await sefin.consultarDPS(n.ambiente, cred.cert, n.id_dps); if (d.ok) chave = d.chave; }
+    if (!chave && n.id_dps) {
+      const d = await sefin.consultarDPS(n.ambiente, cred.cert, n.id_dps);
+      if (d.ok) chave = d.chave;
+      else if (n.status === 'pendente' && d.status === 404) {
+        db.prepare("UPDATE notas SET status = 'rejeitada', mensagens = ?, atualizado_em = datetime('now') WHERE id = ?")
+          .run(JSON.stringify([{ codigo: 'DPS', descricao: 'A Sefin Nacional não gerou NFS-e para esta DPS. Corrija e reenvie.' }]), n.id);
+        return { ok: true, status: 'rejeitada', mensagem: 'A DPS não foi processada pela Sefin: a nota pode ser reenviada.' };
+      }
+    }
     if (!chave) falha('Nota não localizada na Sefin Nacional.');
     const r = await sefin.consultarNFSe(n.ambiente, cred.cert, chave);
     if (!r.ok) falha('Falha na consulta.', 502, { erros: r.erros });
-    const ev = await sefin.consultarEventos(n.ambiente, cred.cert, chave);
-    const evs = JSON.stringify(ev.bruto || '');
-    const cancelada = evs.includes('101101') || evs.includes('105102');
-    db.prepare("UPDATE notas SET chave_acesso = ?, xml_nfse = ?, status = ?, nnfse = COALESCE(?, nnfse), atualizado_em = datetime('now') WHERE id = ?")
-      .run(chave, r.xml, cancelada ? 'cancelada' : 'autorizada', (r.xml.match(/<nNFSe>(\d+)<\/nNFSe>/) || [])[1] || null, n.id);
-    return { ok: true, status: cancelada ? 'cancelada' : 'autorizada' };
+    const sit = await sefin.situacaoEventos(n.ambiente, cred.cert, chave);
+    const nNFSe = (r.xml.match(/<nNFSe>(\d+)<\/nNFSe>/) || [])[1] || null;
+    db.prepare("UPDATE notas SET chave_acesso = ?, xml_nfse = ?, status = ?, nnfse = COALESCE(?, nnfse), dh_proc = COALESCE(dh_proc, ?), atualizado_em = datetime('now') WHERE id = ?")
+      .run(chave, r.xml, sit.status, nNFSe, (r.xml.match(/<dhProc>([^<]+)<\/dhProc>/) || [])[1] || null, n.id);
+    return { ok: true, status: sit.status };
   });
   POST('/api/notas/:id/cancelar', async ({ user, params, body }) => {
     const uid = user.id;
@@ -593,6 +658,229 @@ export function criarApi(P) {
     return query.agrupar === 'servico' ? rows.map(r => ({ ...r, grupo: `${r.grupo} - ${CTRIB.get(r.grupo)?.descricao || ''}` })) : rows;
   });
   GET('/api/auditoria', ({ user }) => db.prepare('SELECT * FROM auditoria WHERE usuario_id = ? ORDER BY id DESC LIMIT 200').all(user.id));
+
+  // ------------------------------------------------------------ numeração (DPS / NFS-e)
+  // Regras (Anexo I): a DPS é única por série + número + município emissor + CPF/CNPJ (E0014);
+  // série 00001–49999 = aplicativo próprio (o Emissor Web usa 70000–79999); o nº da NFS-e é gerado pela Sefin.
+  const ambSefin = c => (c.ambiente === 'producao' ? 'producao' : 'homologacao');
+  function sequenciaLocal(c) {
+    const q = (sql, ...p) => db.prepare(sql).get(...p);
+    const ultDps = q("SELECT MAX(ndps) m FROM notas WHERE contribuinte_id = ? AND serie = ? AND ambiente = ? AND status <> 'rascunho'", c.id, c.serie_dps, c.ambiente).m || 0;
+    const ultNota = q("SELECT nnfse, chave_acesso, dh_proc, competencia FROM notas WHERE contribuinte_id = ? AND ambiente = ? AND nnfse IS NOT NULL ORDER BY CAST(nnfse AS INTEGER) DESC LIMIT 1", c.id, c.ambiente);
+    const pendentes = q("SELECT COUNT(*) n FROM notas WHERE contribuinte_id = ? AND status = 'pendente'", c.id).n;
+    const outrasSeries = db.prepare("SELECT serie, MAX(ndps) ultimo, COUNT(*) qtd FROM notas WHERE contribuinte_id = ? AND ambiente = ? AND status <> 'rascunho' AND serie <> ? GROUP BY serie").all(c.id, c.ambiente, c.serie_dps);
+    return { ambiente: c.ambiente, serie: c.serie_dps, proxNDPS: c.prox_ndps, ultimoDPSLocal: ultDps, ultimaNFSe: ultNota || null, pendentes, outrasSeries,
+      ultimoNSU: c.ultimo_nsu || 0, sincronizadoEm: c.sincronizado_em || null };
+  }
+  GET('/api/contribuintes/:id/sequencia', ({ user, params }) => sequenciaLocal(contribuinte(user.id, params.id)));
+  PUT('/api/contribuintes/:id/sequencia', ({ user, params, body }) => {
+    const c = contribuinte(user.id, params.id);
+    const o = normalizarContrib({ serie_dps: body.serie ?? c.serie_dps, prox_ndps: body.prox_ndps ?? c.prox_ndps });
+    const loc = sequenciaLocal({ ...c, serie_dps: o.serie_dps });
+    if (+o.prox_ndps <= loc.ultimoDPSLocal && !body.forcar) falha(`O próximo número precisa ser maior que o último usado nesta série (${loc.ultimoDPSLocal}).`);
+    db.prepare('UPDATE contribuintes SET serie_dps = ?, prox_ndps = ? WHERE id = ?').run(o.serie_dps, +o.prox_ndps, c.id);
+    audit(user.id, 'sequencia.ajuste', `${c.documento} série ${o.serie_dps} próximo ${o.prox_ndps}`);
+    return sequenciaLocal(contribuinte(user.id, c.id));
+  });
+  // Descobre na Sefin o último nº de DPS já utilizado na série (HEAD /dps/{id}: busca exponencial + binária)
+  POST('/api/contribuintes/:id/sequencia/verificar', async ({ user, params }) => {
+    const c = contribuinte(user.id, params.id);
+    if (c.ambiente === 'simulacao') falha('No modo simulação não há numeração na Sefin. Mude o ambiente para Produção restrita ou Produção.');
+    const cred = await credencial(user.id, c, null, 'consulta');
+    if (!cred.cert) falha('A consulta exige certificado digital (próprio ou de procurador).');
+    const amb = ambSefin(c);
+    let consultas = 0;
+    const existe = async n => { consultas++; return sefin.existeDPS(amb, cred.cert, idDPS({ cLocEmi: c.cod_municipio, tipoDoc: c.tipo_doc, doc: c.documento, serie: c.serie_dps, nDPS: n })); };
+    const loc = sequenciaLocal(c);
+    let lo = 0, hi = null;
+    const inicio = Math.max(1, loc.ultimoDPSLocal, c.prox_ndps - 1);
+    if (await existe(inicio)) lo = inicio;
+    else if (inicio > 1 && await existe(1)) lo = 1;
+    if (lo > 0) {
+      let passo = 1;
+      while (consultas < 60) {
+        const cand = lo + passo;
+        if (await existe(cand)) { lo = cand; passo *= 2; } else { hi = cand; break; }
+      }
+      while (hi !== null && hi - lo > 1 && consultas < 90) {
+        const meio = Math.floor((lo + hi) / 2);
+        if (await existe(meio)) lo = meio; else hi = meio;
+      }
+    }
+    const prox = Math.max(lo, loc.ultimoDPSLocal) + 1;
+    const ajustado = prox > c.prox_ndps;
+    if (ajustado) {
+      db.prepare('UPDATE contribuintes SET prox_ndps = ? WHERE id = ?').run(prox, c.id);
+      audit(user.id, 'sequencia.sefin', `série ${c.serie_dps}: último na Sefin ${lo}; próximo ajustado para ${prox}`);
+    }
+    return { ...sequenciaLocal(contribuinte(user.id, c.id)), ultimoDPSSefin: lo, consultas, ajustado };
+  });
+
+  // Importa do ADN (distribuição por NSU) as NFS-e do CNPJ, inclusive as emitidas fora do app (ex.: Emissor Web)
+  POST('/api/contribuintes/:id/importar-adn', async ({ user, params, body }) => {
+    const c = contribuinte(user.id, params.id);
+    if (c.ambiente === 'simulacao') falha('Importação do ADN disponível apenas em Produção restrita ou Produção.');
+    const cred = await credencial(user.id, c, null, 'consulta');
+    if (!cred.cert) falha('A distribuição do ADN exige certificado digital.');
+    const amb = ambSefin(c);
+    let nsu = body?.reiniciar ? 0 : (c.ultimo_nsu || 0);
+    const res = { lotes: 0, documentos: 0, importadas: 0, atualizadas: 0, eventos: 0, ignoradas: 0, concluida: false, erros: [] };
+    while (res.lotes < (+body?.maxLotes || 20)) {
+      const r = await sefin.distribuicaoDFe(amb, cred.cert, nsu, c.tipo_doc === 'CNPJ' ? c.documento : undefined);
+      if (!r.ok) { res.erros.push(...r.erros); break; }
+      if (!r.docs.length) { res.concluida = true; break; }
+      res.lotes++;
+      for (const d of r.docs) {
+        res.documentos++;
+        if (d.nsu > nsu) nsu = d.nsu;
+        try {
+          if (/<(\w+:)?NFSe[\s>]/.test(d.xml)) {
+            const x = resumoNFSe(d.xml);
+            if (so(x.prestDoc || x.emitDoc) !== so(c.documento)) { res.ignoradas++; continue; }
+            const ex = db.prepare('SELECT id, status FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(user.id, x.chave);
+            if (ex) {
+              db.prepare("UPDATE notas SET xml_nfse = COALESCE(xml_nfse, ?), nnfse = COALESCE(nnfse, ?), atualizado_em = datetime('now') WHERE id = ?").run(d.xml, x.nNFSe, ex.id);
+              res.atualizadas++;
+            } else {
+              const retido = x.tpRetISSQN && x.tpRetISSQN !== '1';
+              db.prepare(`INSERT INTO notas (usuario_id, contribuinte_id, status, ambiente, serie, ndps, id_dps, chave_acesso, nnfse, dh_emi, competencia, dh_proc, tomador_doc, tomador_nome,
+                ctribnac, cnbs, descricao, valor_servico, valor_desconto_incond, base_calculo, aliq_iss, valor_iss, iss_retido, valor_pis, valor_cofins, valor_irrf, valor_csll, valor_inss,
+                valor_retencoes, valor_liquido, valor_ibs, valor_cbs, emitido_via, origem, dados, xml_nfse, mensagens)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+                user.id, c.id, x.chSubstda ? 'autorizada' : 'autorizada', c.ambiente, x.serie.padStart(5, '0'), +x.nDPS || null, x.idDps, x.chave, x.nNFSe, x.dhEmi, x.dCompet, x.dhProc,
+                x.tomaDoc, x.tomaNome, x.cTribNac, x.cNBS, x.xDescServ, x.vServ, x.vDescIncond, x.vBC, x.pAliq, x.vISSQN, retido ? 1 : 0, x.vPis, x.vCofins, x.vIRRF, x.vCSLL, x.vCP,
+                x.vTotalRet, x.vLiq, x.vIBS, x.vCBS, 'adn', 'adn',
+                JSON.stringify({ form: { competencia: x.dCompet, ctribnac: x.cTribNac, cnbs: x.cNBS, descricao: x.xDescServ, valor_servico: x.vServ, trib_issqn: '1', tp_ret_issqn: x.tpRetISSQN || '1', aliq_iss: x.pAliq },
+                  tomador: x.tomaDoc ? { tipo_doc: x.tomaTipo, documento: x.tomaDoc, nome: x.tomaNome } : null }),
+                d.xml, JSON.stringify([{ codigo: 'ADN', descricao: 'Importada da distribuição do Ambiente de Dados Nacional (ADN).' }]));
+              res.importadas++;
+            }
+            if (x.chSubstda) db.prepare("UPDATE notas SET status = 'substituida' WHERE usuario_id = ? AND chave_acesso = ?").run(user.id, x.chSubstda);
+            // Mantém a numeração à frente do maior nº de DPS encontrado nesta série
+            if (x.serie && +x.serie === +c.serie_dps && +x.nDPS >= contribuinte(user.id, c.id).prox_ndps) db.prepare('UPDATE contribuintes SET prox_ndps = ? WHERE id = ?').run(+x.nDPS + 1, c.id);
+          } else if (/e101101|e105102/.test(d.xml)) {
+            const ch = (d.xml.match(/<chNFSe>(\d{50})<\/chNFSe>/) || [])[1] || d.chave;
+            const st = /e105102/.test(d.xml) ? 'substituida' : 'cancelada';
+            const u = db.prepare('UPDATE notas SET status = ? WHERE usuario_id = ? AND chave_acesso = ?').run(st, user.id, ch);
+            if (u.changes) res.eventos++; else res.ignoradas++;
+          } else res.ignoradas++;
+        } catch (e) { res.erros.push({ codigo: 'XML', descricao: `NSU ${d.nsu}: ${e.message}` }); }
+      }
+      if (r.docs.length < 50) { res.concluida = true; break; }
+    }
+    db.prepare("UPDATE contribuintes SET ultimo_nsu = ?, sincronizado_em = datetime('now') WHERE id = ?").run(nsu, c.id);
+    audit(user.id, 'adn.importar', `${c.documento}: ${res.importadas} novas, ${res.eventos} eventos, NSU ${nsu}`);
+    return { ...res, ultimoNSU: nsu, sequencia: sequenciaLocal(contribuinte(user.id, c.id)) };
+  });
+
+  // ------------------------------------------------------------ cadeia do certificado
+  POST('/api/certificados/:id/cadeia', async ({ user, params }) => {
+    const row = db.prepare('SELECT * FROM certificados WHERE id = ? AND usuario_id = ?').get(params.id, user.id);
+    if (!row) falha('Certificado não encontrado.');
+    const pfx = await P.cofre.decrypt(row.pfx_enc, true), senha = await P.cofre.decrypt(row.senha_enc);
+    const prep = await prepararPfx(pfx, senha, lerPfx(pfx, senha));
+    db.prepare('UPDATE certificados SET pfx_enc = ?, cadeia = ? WHERE id = ?').run(await P.cofre.encrypt(prep.bytes), JSON.stringify(prep.cadeia), row.id);
+    return resumoCert(db.prepare('SELECT * FROM certificados WHERE id = ?').get(row.id));
+  });
+
+  // ------------------------------------------------------------ diagnóstico de produção
+  GET('/api/contribuintes/:id/diagnostico', async ({ user, params, query }) => {
+    const c = contribuinte(user.id, params.id);
+    const ck = [];
+    const add = (grupo, item, status, detalhe = '') => ck.push({ grupo, item, status, detalhe });
+    // Cadastro
+    add('Cadastro', 'CPF/CNPJ do emitente', docValido(c.tipo_doc, c.documento) ? 'ok' : 'erro', c.documento);
+    add('Cadastro', 'Município emissor (IBGE)', MUN.has(c.cod_municipio) ? 'ok' : 'erro', nomeMunicipio(c.cod_municipio));
+    add('Cadastro', 'Regime tributário', REGIMES[c.regime] ? 'ok' : 'erro', REGIMES[c.regime]?.label || c.regime);
+    add('Cadastro', 'Inscrição municipal', c.im ? 'ok' : 'aviso', c.im ? c.im : 'Não informada. Só deixe em branco se o município NÃO tiver cadastro complementar no CNC (senão a DPS é rejeitada).');
+    if (c.regime === 'SN' && !(+c.aliq_sn > 0)) add('Cadastro', 'Alíquota efetiva do Simples (pTotTribSN)', 'aviso', 'Informe a alíquota efetiva do Simples Nacional.');
+    // Numeração
+    const seq = sequenciaLocal(c);
+    add('Numeração', 'Série da DPS', +c.serie_dps >= 1 && +c.serie_dps <= 49999 ? 'ok' : 'erro', `${c.serie_dps} (faixa 00001–49999 de aplicativo próprio). Use séries diferentes no Windows e no Android.`);
+    add('Numeração', 'Próximo nº da DPS', c.prox_ndps > seq.ultimoDPSLocal ? 'ok' : 'erro', `próximo ${c.prox_ndps}; último usado neste aparelho ${seq.ultimoDPSLocal}`);
+    add('Numeração', 'Notas pendentes de confirmação', seq.pendentes ? 'erro' : 'ok', seq.pendentes ? `${seq.pendentes} nota(s) sem resposta da Sefin: consulte-as antes de continuar.` : 'nenhuma');
+    // Certificado / acesso
+    let cred = null;
+    try { cred = await credencial(user.id, c, query.procuracao_id || null, 'emissao'); } catch (e) { add('Certificado', 'Certificado para assinatura/transmissão', 'erro', e.message); }
+    if (cred && !cred.cert) add('Certificado', 'Certificado para assinatura/transmissão', 'erro', 'Nenhum certificado A1 vinculado (próprio ou procuração). Certificados A3 (token/cartão) não são suportados.');
+    if (cred?.cert) {
+      const r = cred.cert.row, rc = resumoCert(r);
+      add('Certificado', 'Validade', rc.situacao === 'valido' ? 'ok' : rc.situacao === 'vencendo' ? 'aviso' : 'erro', `${rc.titular} — até ${r.valido_ate.slice(0, 10)} (${rc.dias_restantes} dias)`);
+      add('Certificado', 'Titular', cred.via === 'procuracao' || so(r.documento) === so(c.documento) ? 'ok' : 'aviso',
+        cred.via === 'procuracao' ? `Procurador ${fmtDocTxt(r.documento)} (procuração eletrônica)` : so(r.documento) === so(c.documento) ? 'Certificado do próprio emitente' : `Documento do certificado (${r.documento}) difere do emitente: cadastre como procuração.`);
+      const cad = rc.cadeia || {};
+      add('Certificado', 'Cadeia ICP-Brasil', cad.completa && cad.icp ? 'ok' : cad.completa ? 'aviso' : 'erro',
+        cad.completa ? `${cad.niveis} nível(is) até ${cad.raiz}${cad.icp ? '' : ' (raiz não identificada como ICP-Brasil)'}` : `Cadeia incompleta${cad.aviso ? ': ' + cad.aviso : ''}. Use "Completar cadeia" em Certificados.`);
+      if (cred.via === 'procuracao') {
+        const p = cred.procuracao;
+        add('Procuração', 'Vigência', p.valida_ate ? 'ok' : 'aviso', p.valida_ate ? `até ${p.valida_ate} (${p.fonte_validade === 'receita' ? 'confirmada na Receita' : 'informada manualmente'})` : 'Sem data de validade cadastrada: confira no e-CAC ou pelo Integra Contador.');
+        add('Procuração', 'Serviço NFS-e na procuração (e-CAC)', p.sistemas ? (/nfs/i.test(p.sistemas) ? 'ok' : 'aviso') : 'info', p.sistemas || 'A procuração no e-CAC precisa incluir o serviço "NFS-e". Verifique pelo Integra Contador ou no e-CAC.');
+      }
+    }
+    // Ambiente
+    const homolog = db.prepare("SELECT COUNT(*) n FROM notas WHERE contribuinte_id = ? AND ambiente = 'homologacao' AND status = 'autorizada'").get(c.id).n;
+    add('Ambiente', 'Ambiente atual', c.ambiente === 'producao' ? 'ok' : 'info', { simulacao: 'Simulação (nada é transmitido)', homologacao: 'Produção restrita (homologação oficial)', producao: 'Produção' }[c.ambiente]);
+    add('Ambiente', 'Testes na Produção restrita', homolog ? 'ok' : 'aviso', homolog ? `${homolog} nota(s) autorizada(s) em homologação` : 'Nenhuma nota autorizada em Produção restrita ainda: valide ao menos uma emissão e um cancelamento antes de ir para Produção.');
+    // Verificações remotas (opcionais)
+    const alvo = query.ambiente === 'producao' ? 'producao' : query.ambiente === 'homologacao' ? 'homologacao' : ambSefin(c);
+    if (query.remoto && cred?.cert) {
+      try {
+        const existe = await sefin.existeDPS(alvo, cred.cert, idDPS({ cLocEmi: c.cod_municipio, tipoDoc: c.tipo_doc, doc: c.documento, serie: c.serie_dps, nDPS: c.prox_ndps }));
+        add('Comunicação', `Conexão mTLS com a Sefin (${alvo === 'producao' ? 'Produção' : 'Produção restrita'})`, 'ok', 'Certificado aceito pela Sefin Nacional.');
+        add('Comunicação', 'Próximo nº de DPS livre na Sefin', existe ? 'erro' : 'ok', existe ? `O nº ${c.prox_ndps} já foi usado: rode "Verificar numeração na Sefin".` : `nº ${c.prox_ndps} disponível`);
+      } catch (e) { add('Comunicação', 'Conexão mTLS com a Sefin', 'erro', e.message); }
+      try {
+        const cv = await sefin.convenio(alvo, cred.cert, c.cod_municipio);
+        const txtCv = typeof cv.dados === 'string' ? cv.dados : JSON.stringify(cv.dados || {});
+        const ativo = cv.ok && !/inativ|n[aã]o convenia|desativ/i.test(txtCv);
+        add('Comunicação', `Convênio do município ${nomeMunicipio(c.cod_municipio)}`, cv.ok ? (ativo ? 'ok' : 'aviso') : 'erro', cv.ok ? txtCv.slice(0, 300) : `HTTP ${cv.status}: ${cv.erros?.[0]?.descricao || ''} — o município pode não ter aderido ao Sistema Nacional.`);
+      } catch (e) { add('Comunicação', 'Convênio do município', 'erro', e.message); }
+    } else if (query.remoto) add('Comunicação', 'Testes de comunicação', 'erro', 'Sem certificado: não é possível testar a comunicação com a Sefin.');
+    else add('Comunicação', 'Testes de comunicação', 'info', 'Clique em "Testar comunicação" para validar o certificado na Sefin e o convênio do município.');
+    const erros = ck.filter(x => x.status === 'erro').length;
+    return { checks: ck, erros, avisos: ck.filter(x => x.status === 'aviso').length, prontoProducao: erros === 0 && homolog > 0, ambiente: c.ambiente };
+  });
+
+  // ------------------------------------------------------------ Integra Contador (SERPRO) – procurações
+  const integra = criarIntegraContador(P.http);
+  const cfgLer = (uid, k) => json(db.prepare('SELECT valor FROM configuracoes WHERE usuario_id = ? AND chave = ?').get(uid, k)?.valor, null);
+  const cfgGravar = (uid, k, v) => db.prepare('INSERT INTO configuracoes (usuario_id, chave, valor) VALUES (?,?,?) ON CONFLICT(usuario_id, chave) DO UPDATE SET valor = excluded.valor').run(uid, k, JSON.stringify(v));
+  GET('/api/config/integra-contador', ({ user }) => {
+    const c = cfgLer(user.id, 'integra') || {};
+    return { ambiente: c.ambiente || 'trial', consumerKey: c.consumerKey || '', temSecret: !!c.secretEnc, certificado_id: c.certificado_id || null, contratante: c.contratante || '' };
+  });
+  PUT('/api/config/integra-contador', async ({ user, body }) => {
+    const atual = cfgLer(user.id, 'integra') || {};
+    const novo = { ...atual, ambiente: body.ambiente === 'producao' ? 'producao' : 'trial', consumerKey: body.consumerKey ?? atual.consumerKey, certificado_id: body.certificado_id || null, contratante: so(body.contratante || '') };
+    if (body.consumerSecret) novo.secretEnc = await P.cofre.encrypt(body.consumerSecret);
+    cfgGravar(user.id, 'integra', novo);
+    return { ok: true };
+  });
+  POST('/api/procuracoes/verificar-receita', async ({ user, body }) => {
+    const cfg = cfgLer(user.id, 'integra') || {};
+    const trial = (cfg.ambiente || 'trial') === 'trial';
+    let cert = null;
+    if (!trial) {
+      if (!cfg.consumerKey || !cfg.secretEnc || !cfg.certificado_id) falha('Configure o Integra Contador (Consumer Key/Secret e certificado do contratante) em Configurações.');
+      cert = await carregarCertificado(cfg.certificado_id, user.id);
+    }
+    const lista = db.prepare(`SELECT p.*, ct.documento contrib_doc, ct.razao_social FROM procuracoes p JOIN contribuintes ct ON ct.id = p.contribuinte_id WHERE p.usuario_id = ? ${body?.procuracao_id ? 'AND p.id = ?' : ''}`)
+      .all(...[user.id, ...(body?.procuracao_id ? [body.procuracao_id] : [])]);
+    const out = [];
+    for (const p of lista) {
+      try {
+        const r = await integra.obterProcuracoes({ ambiente: trial ? 'trial' : 'producao', consumerKey: cfg.consumerKey, consumerSecret: trial ? '' : await P.cofre.decrypt(cfg.secretEnc), cert,
+          contratante: cfg.contratante || cert?.row?.documento || p.procurador_doc, outorgante: p.contrib_doc, outorgado: p.procurador_doc });
+        const esc = procuracaoNFSe(r.procuracoes);
+        if (esc && !trial) {
+          db.prepare("UPDATE procuracoes SET valida_ate = ?, sistemas = ?, verificada_em = datetime('now'), fonte_validade = 'receita' WHERE id = ?").run(esc.validaAte, esc.sistemas.join('; '), p.id);
+        }
+        out.push({ id: p.id, empresa: p.razao_social, procurador: p.procurador_nome, encontradas: r.procuracoes.length, validaAte: esc?.validaAte || null, sistemas: esc?.sistemas || [], mensagens: r.mensagens, trial });
+      } catch (e) { out.push({ id: p.id, empresa: p.razao_social, procurador: p.procurador_nome, erro: e.message }); }
+    }
+    audit(user.id, 'procuracao.receita', `${out.length} consultada(s)${trial ? ' (trial)' : ''}`);
+    return { resultados: out, trial };
+  });
 
   // Backup completo do banco (útil principalmente no Android)
   if (P.exportarBanco) GET('/api/backup', ({ user }) => ({ arquivo: { nome: `vorticis-backup-${new Date().toISOString().slice(0, 10)}.sqlite`, tipo: 'application/octet-stream', dados: P.exportarBanco(user) } }));

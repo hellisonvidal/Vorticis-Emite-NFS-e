@@ -46,8 +46,8 @@ async function iniciar() {
   let chave = await kv('get', 'chave-mestra');
   if (!chave) { chave = randomBytes(32); await kv('put', 'chave-mestra', chave); }
 
-  const http = async ({ url, method = 'GET', headers = {}, body, pfx, senha }) => {
-    const r = await Nativo.http({ url, method, headers, body: body ? b64(new TextEncoder().encode(body)) : null, pfx: pfx ? b64(pfx) : null, senha: senha || '' });
+  const http = async ({ url, method = 'GET', headers = {}, body, pfx, senha, publico }) => {
+    const r = await Nativo.http({ url, method, headers, body: body ? b64(new TextEncoder().encode(body)) : null, pfx: pfx ? b64(pfx) : null, senha: senha || '', publico: !!publico });
     return { status: r.status, headers: r.headers || {}, body: unb64(r.body || '') };
   };
 

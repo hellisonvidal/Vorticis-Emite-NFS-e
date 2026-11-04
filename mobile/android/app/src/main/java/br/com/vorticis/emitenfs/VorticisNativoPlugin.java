@@ -35,6 +35,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import java.net.HttpURLConnection;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -59,17 +60,22 @@ public class VorticisNativoPlugin extends Plugin {
         String pfx = call.getString("pfx");
         String senha = call.getString("senha", "");
         JSObject cabecalhos = call.getObject("headers", new JSObject());
-        HttpsURLConnection con = null;
+        boolean publico = Boolean.TRUE.equals(call.getBoolean("publico", false));
+        HttpURLConnection con = null;
         try {
-            con = (HttpsURLConnection) new URL(url).openConnection();
-            if (pfx != null && !pfx.isEmpty()) {
+            if (url == null || !(url.startsWith("https://") || (publico && url.startsWith("http://")))) {
+                call.reject("Somente conexões HTTPS são permitidas (HTTP apenas para download público de cadeia de certificados).");
+                return;
+            }
+            con = (HttpURLConnection) new URL(url).openConnection();
+            if (pfx != null && !pfx.isEmpty() && con instanceof HttpsURLConnection) {
                 KeyStore ks = KeyStore.getInstance("PKCS12");
                 ks.load(new ByteArrayInputStream(Base64.decode(pfx, Base64.DEFAULT)), senha.toCharArray());
                 KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
                 kmf.init(ks, senha.toCharArray());
                 SSLContext ctx = SSLContext.getInstance("TLS");
                 ctx.init(kmf.getKeyManagers(), null, null);
-                con.setSSLSocketFactory(ctx.getSocketFactory());
+                ((HttpsURLConnection) con).setSSLSocketFactory(ctx.getSocketFactory());
             }
             con.setRequestMethod(metodo);
             con.setConnectTimeout(30000);

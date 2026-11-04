@@ -239,8 +239,10 @@ export function nfseSimulada({ chave, nNFSe, dpsAssinada, contrib, calc, municip
     `<totCIBS><vTotNF>${dec(ib.vTotNF)}</vTotNF><gIBS><vIBSTot>${dec(ib.vIBS)}</vIBSTot><gIBSUFTot><vIBSUF>${dec(ib.vIBSUF)}</vIBSUF></gIBSUFTot><gIBSMunTot><vIBSMun>${dec(ib.vIBSMun)}</vIBSMun></gIBSMunTot></gIBS>` +
     `<gCBS><vCBS>${dec(ib.vCBS)}</vCBS></gCBS></totCIBS></IBSCBS>` : '';
   return `<NFSe xmlns="${NS}" versao="${VERSAO}"><infNFSe Id="NFS${chave}"><xLocEmi>${esc(municipio)}</xLocEmi><xLocPrestacao>${esc(municipio)}</xLocPrestacao>` +
-    `<nNFSe>${nNFSe}</nNFSe><xTribNac>SIMULAÇÃO - SEM VALOR FISCAL</xTribNac><verAplic>${VER_APLIC}</verAplic><ambGer>2</ambGer><tpEmis>1</tpEmis><cStat>100</cStat>` +
-    `<dhProc>${dataHoraBR()}</dhProc><nDFSe>${nNFSe}</nDFSe><emit>${documento(contrib)}<xNome>${esc(contrib.razao_social)}</xNome></emit>` +
+    `<nNFSe>${nNFSe}</nNFSe><cLocIncid>${so(contrib.cod_municipio)}</cLocIncid><xLocIncid>${esc(municipio)}</xLocIncid><xTribNac>SIMULAÇÃO - SEM VALOR FISCAL</xTribNac><verAplic>${VER_APLIC}</verAplic><ambGer>2</ambGer><tpEmis>1</tpEmis><cStat>100</cStat>` +
+    `<dhProc>${dataHoraBR()}</dhProc><nDFSe>${nNFSe}</nDFSe><emit>${documento(contrib)}${contrib.im ? `<IM>${so(contrib.im)}</IM>` : ''}<xNome>${esc(contrib.razao_social)}</xNome>` +
+    `<enderNac><xLgr>${esc(contrib.logradouro || '-')}</xLgr><nro>${esc(contrib.numero || 'S/N')}</nro><xBairro>${esc(contrib.bairro || '-')}</xBairro><cMun>${so(contrib.cod_municipio)}</cMun><UF>${esc(contrib.uf || '')}</UF><CEP>${so(contrib.cep) || '00000000'}</CEP></enderNac>` +
+    `${contrib.fone ? `<fone>${so(contrib.fone)}</fone>` : ''}${contrib.email ? `<email>${esc(contrib.email)}</email>` : ''}</emit>` +
     `<valores><vBC>${dec(calc.bcISS)}</vBC>${calc.aliq ? `<pAliqAplic>${dec(calc.aliq)}</pAliqAplic>` : ''}<vISSQN>${dec(calc.vISS)}</vISSQN><vTotalRet>${dec(calc.vTotalRet)}</vTotalRet><vLiq>${dec(calc.vLiq)}</vLiq></valores>` +
     `${ibsXml}${dps}</infNFSe></NFSe>`;
 }

@@ -1,6 +1,7 @@
 // Vorticis Emite NFS - servidor local (usado pela versão Windows/Electron e pelo modo navegador).
 import express from 'express';
 import https from 'node:https';
+import httpPlano from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,9 +18,11 @@ const VERSAO = JSON.parse(fs.readFileSync(path.join(RAIZ, 'package.json'), 'utf8
 function http({ url, method = 'GET', headers = {}, body, pfx, senha, timeout = 60000 }) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    if (u.protocol === 'http:' && pfx) return reject(new Error('Certificado digital só pode ser usado em conexões HTTPS.'));
+    const mod = u.protocol === 'http:' ? httpPlano : https;
     const data = body ? Buffer.from(body) : null;
-    const req = https.request({
-      hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method, timeout,
+    const req = mod.request({
+      hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443), path: u.pathname + u.search, method, timeout,
       ...(pfx ? { pfx: Buffer.from(pfx), passphrase: senha } : {}),
       headers: { 'User-Agent': `VorticisEmiteNFS/${VERSAO}`, ...headers, ...(data ? { 'Content-Length': data.length } : {}) },
     }, res => {

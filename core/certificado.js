@@ -57,7 +57,9 @@ export function lerPfx(pfxBytes, senha) {
     if (m) { documento = m[1]; tipo_doc = m[1].length === 14 ? 'CNPJ' : 'CPF'; }
   }
   const titular = cn.split(':')[0];
+  const cad = analisarCadeia(leaf, chain);
   return {
+    cadeiaCompleta: cad.completa, cadeiaICP: cad.icp, cadeiaNiveis: cad.cadeia.length, cadeiaRaiz: cad.raiz,
     titular, documento, tipo_doc,
     responsavelCpf: other[OID_CPF_RESP] ? other[OID_CPF_RESP].substr(8, 11) : '',
     emissor: leaf.issuer.getField('CN')?.value || '',
@@ -76,5 +78,103 @@ export function resumoCert(row) {
     id: row.id, apelido: row.apelido, titular: row.titular, documento: row.documento, tipo_doc: row.tipo_doc,
     emissor: row.emissor, valido_de: row.valido_de, valido_ate: row.valido_ate, dias_restantes: dias,
     situacao: dias < 0 ? 'vencido' : dias <= 30 ? 'vencendo' : 'valido',
+    cadeia: (() => { try { return JSON.parse(row.cadeia || '{}'); } catch { return {}; } })(),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cadeia de certificação ICP-Brasil
+// O ADN/Sefin exigem, na autenticação mútua, a cadeia até a raiz ICP-Brasil. Muitos arquivos .pfx trazem
+// apenas o certificado do titular; nesse caso as ACs intermediárias são obtidas pelo endereço AIA
+// (Authority Information Access - caIssuers) gravado no próprio certificado e o .pfx é reempacotado.
+const OID_AIA = '1.3.6.1.5.5.7.1.1';
+const OID_CA_ISSUERS = '1.3.6.1.5.5.7.48.2';
+
+export function urlsAIA(cert) {
+  const ext = cert.extensions.find(e => e.id === OID_AIA);
+  if (!ext) return [];
+  const urls = [];
+  try {
+    const asn = forge.asn1.fromDer(ext.value);
+    for (const ad of asn.value) {
+      const oid = forge.asn1.derToOid(ad.value[0].value);
+      const gn = ad.value[1];
+      if (oid === OID_CA_ISSUERS && gn.type === 6) urls.push(String(gn.value));
+    }
+  } catch { /* extensão malformada */ }
+  return urls;
+}
+
+const autoAssinado = c => { try { return c.isIssuer(c) && c.verify(c); } catch { return false; } };
+const emitidoPor = (filho, pai) => { try { return pai.verify(filho); } catch { return false; } };
+
+/** Ordena a cadeia a partir do titular e informa se termina numa raiz auto-assinada. */
+export function analisarCadeia(leaf, outros) {
+  const cadeia = [leaf];
+  let atual = leaf;
+  const resto = [...outros];
+  for (let i = 0; i < 6 && !autoAssinado(atual); i++) {
+    const idx = resto.findIndex(c => emitidoPor(atual, c));
+    if (idx < 0) break;
+    atual = resto.splice(idx, 1)[0];
+    cadeia.push(atual);
+  }
+  const raiz = cadeia[cadeia.length - 1];
+  const completa = autoAssinado(raiz);
+  const icp = completa && /ICP-Brasil/i.test(raiz.subject.getField('O')?.value || raiz.subject.getField('CN')?.value || '');
+  return { cadeia, completa, icp, raiz: raiz.subject.getField('CN')?.value || '' };
+}
+
+function certsDeArquivo(bytes) {
+  const bin = binario(bytes);
+  const out = [];
+  try {
+    if (bin.includes('-----BEGIN')) {
+      for (const pem of bin.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || []) out.push(forge.pki.certificateFromPem(pem));
+      if (bin.includes('BEGIN PKCS7')) out.push(...forge.pkcs7.messageFromPem(bin).certificates);
+      return out;
+    }
+    const asn = forge.asn1.fromDer(forge.util.createBuffer(bin));
+    try { out.push(forge.pki.certificateFromAsn1(asn)); } catch { out.push(...forge.pkcs7.messageFromAsn1(asn).certificates); }
+  } catch { /* formato desconhecido */ }
+  return out;
+}
+
+/**
+ * Garante a cadeia completa no PFX. `baixar(url) -> Promise<Uint8Array>` é fornecido pela plataforma.
+ * Retorna { pfx (possivelmente reempacotado), alterado, completa, icp, niveis, raiz, aviso }.
+ */
+export async function completarCadeia(pfxBytes, senha, baixar) {
+  const asn = forge.asn1.fromDer(forge.util.createBuffer(binario(pfxBytes)));
+  const p12 = forge.pkcs12.pkcs12FromAsn1(asn, false, senha);
+  const key = ((p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] || [])[0]
+    || (p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag] || [])[0]).key;
+  const certs = (p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || []).map(b => b.cert);
+  const pub = forge.pki.publicKeyToPem(forge.pki.setRsaPublicKey(key.n, key.e));
+  const leaf = certs.find(c => forge.pki.publicKeyToPem(c.publicKey) === pub) || certs[0];
+  let extras = certs.filter(c => c !== leaf);
+  let a = analisarCadeia(leaf, extras);
+  let baixados = 0, aviso = '';
+  for (let i = 0; i < 5 && !a.completa; i++) {
+    const ultimo = a.cadeia[a.cadeia.length - 1];
+    const urls = urlsAIA(ultimo);
+    if (!urls.length) { aviso = 'Certificado sem endereço AIA para obter a AC emissora.'; break; }
+    let novos = [];
+    for (const u of urls) {
+      try { novos = certsDeArquivo(await baixar(u)); if (novos.length) break; } catch (e) { aviso = `Falha ao baixar ${u}: ${e.message}`; }
+    }
+    if (!novos.length) break;
+    baixados += novos.length;
+    extras = [...extras, ...novos];
+    a = analisarCadeia(leaf, extras);
+  }
+  const info = { completa: a.completa, icp: a.icp, niveis: a.cadeia.length, raiz: a.raiz, aviso, alterado: false, pfx: pfxBytes };
+  if (baixados && a.cadeia.length > 1) {
+    const novo = forge.pkcs12.toPkcs12Asn1(key, a.cadeia, senha, { algorithm: '3des', friendlyName: leaf.subject.getField('CN')?.value });
+    const der = forge.asn1.toDer(novo).getBytes();
+    const out = new Uint8Array(der.length);
+    for (let i = 0; i < der.length; i++) out[i] = der.charCodeAt(i);
+    Object.assign(info, { pfx: out, alterado: true });
+  }
+  return info;
 }

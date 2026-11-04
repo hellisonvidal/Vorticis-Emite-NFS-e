@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS em todas as comunicações. HTTP simples é permitido apenas porque os repositórios das ACs ICP-Brasil
+     publicam as cadeias de certificação (AIA) em http://; o plugin nativo só aceita HTTP para esses downloads públicos. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
