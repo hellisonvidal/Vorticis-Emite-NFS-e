@@ -1,0 +1,6 @@
+{
+  "name": "vorticis-emite-nfs-android",
+  "private": true,
+  "description": "Projeto Capacitor do Vorticis Emite NFS (as dependências ficam no package.json da raiz)",
+  "type": "module"
+}

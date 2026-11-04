@@ -1,0 +1,116 @@
+name: Build Vorticis Emite NFS
+
+# Gera o instalador Windows e o APK Android.
+# - push na main / pull request: testes + builds (artefatos disponíveis na aba Actions)
+# - tag v* (ex.: v1.0.1): também publica uma Release com os arquivos
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+      - run: npm ci
+      - run: npm test
+
+  windows:
+    needs: testes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Versão a partir da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+      - name: Instalador NSIS e versão portátil
+        shell: bash
+        env:
+          # Opcional: certificado de assinatura de código (Authenticode) .pfx em base64 + senha
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if [ -n "$WIN_CSC_LINK" ]; then export CSC_LINK="$WIN_CSC_LINK" CSC_KEY_PASSWORD="$WIN_CSC_KEY_PASSWORD"; fi
+          npx electron-builder --win nsis portable --x64 --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vorticis-windows
+          path: |
+            dist/*.exe
+          if-no-files-found: error
+
+  android:
+    needs: testes
+    runs-on: ubuntu-latest
+    env:
+      TEM_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: android-actions/setup-android@v3
+      - run: npm ci
+      - name: Versão
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; npm version --no-git-tag-version --allow-same-version "$V"; else V=$(node -p "require('./package.json').version"); fi
+          echo "VORTICIS_VERSAO=$V" >> "$GITHUB_ENV"
+          echo "VORTICIS_BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
+      - name: Pacote web + sincronização Capacitor
+        run: |
+          node mobile/build.js
+          cd mobile && npx cap sync android
+      - name: Keystore de release (se configurada)
+        if: env.TEM_KEYSTORE == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/vorticis.jks"
+          echo "VORTICIS_KEYSTORE=$RUNNER_TEMP/vorticis.jks" >> "$GITHUB_ENV"
+      - name: Gradle (APK de depuração e, com keystore, de release)
+        working-directory: mobile/android
+        env:
+          VORTICIS_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          VORTICIS_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          VORTICIS_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          if [ -n "$VORTICIS_KEYSTORE" ]; then ./gradlew assembleRelease bundleRelease; fi
+          mkdir -p ../../dist
+          cp app/build/outputs/apk/debug/app-debug.apk "../../dist/Vorticis-Emite-NFS-${VORTICIS_VERSAO}-android-debug.apk"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then cp app/build/outputs/apk/release/app-release.apk "../../dist/Vorticis-Emite-NFS-${VORTICIS_VERSAO}-android.apk"; fi
+          if [ -f app/build/outputs/bundle/release/app-release.aab ]; then cp app/build/outputs/bundle/release/app-release.aab "../../dist/Vorticis-Emite-NFS-${VORTICIS_VERSAO}-android.aab"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vorticis-android
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artefatos, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Vorticis Emite NFS ${{ github.ref_name }}
+          files: artefatos/*
+          generate_release_notes: true

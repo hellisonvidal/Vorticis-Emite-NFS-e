@@ -1,0 +1,13 @@
+node_modules/
+data/
+dist/
+mobile/www/
+mobile/src/entrada.js
+mobile/android/app/src/main/assets/public/
+mobile/android/app/src/main/assets/capacitor.config.json
+mobile/android/app/src/main/assets/capacitor.plugins.json
+*.pfx
+*.p12
+*.jks
+*.keystore
+.master.key

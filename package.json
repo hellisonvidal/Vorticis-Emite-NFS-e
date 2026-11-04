@@ -1,0 +1,102 @@
+{
+  "name": "vorticis-emite-nfs",
+  "productName": "Vorticis Emite NFS",
+  "version": "1.0.0",
+  "description": "Vorticis Emite NFS - emissor de NFS-e Padrão Nacional com IBS/CBS (Windows, Android e navegador)",
+  "author": "Vorticis",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.js",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test tests/*.test.js",
+    "tabelas": "python3 scripts/importar_tabelas.py docs-oficiais core/data",
+    "desktop": "electron .",
+    "build:win": "electron-builder --win nsis portable",
+    "build:mobile-web": "node mobile/build.js",
+    "build:android": "node mobile/build.js && cd mobile && npx cap sync android && cd android && ./gradlew assembleDebug",
+    "icones": "node scripts/gerar-icones.cjs",
+    "demo": "node scripts/demo.js"
+  },
+  "dependencies": {
+    "chart.js": "^4.6.1",
+    "express": "^5.3.0",
+    "fflate": "^0.8.3",
+    "node-forge": "^1.4.3"
+  },
+  "devDependencies": {
+    "@xmldom/xmldom": "^0.9.12",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "sql.js": "^1.15.2",
+    "xml-crypto": "^6.4.0"
+  },
+  "build": {
+    "appId": "br.com.vorticis.emitenfs",
+    "productName": "Vorticis Emite NFS",
+    "copyright": "Copyright © 2026 Vorticis",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "package.json",
+      "desktop/**",
+      "server/**",
+      "core/**",
+      "public/**",
+      "!**/*.map",
+      "!node_modules/chart.js/dist/chunks/**/*.map"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Vorticis-Emite-NFS-${version}-${arch}.${ext}",
+      "executableName": "VorticisEmiteNFS"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Vorticis Emite NFS",
+      "uninstallDisplayName": "Vorticis Emite NFS",
+      "installerLanguages": [
+        "pt_BR"
+      ],
+      "language": "1046",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Vorticis-Emite-NFS-${version}-instalador.${ext}"
+    },
+    "portable": {
+      "artifactName": "Vorticis-Emite-NFS-${version}-portatil.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    }
+  }
+}
