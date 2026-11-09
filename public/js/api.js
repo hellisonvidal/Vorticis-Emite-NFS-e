@@ -71,28 +71,31 @@ export async function entregarArquivo({ nome, tipo, dados, inline }) {
   setTimeout(() => URL.revokeObjectURL(href), 15000);
 }
 
-// Download autenticado (XML, CSV, PDF)
-export async function baixarArquivo(url, nome) {
+// Download autenticado (XML, CSV, PDF); opts.method/opts.body para rotas POST (ex.: DANFSe em lote)
+export async function baixarArquivo(url, nome, { method = 'GET', body } = {}) {
   if (pronto()) await pronto();
   if (local()) {
-    const r = await chamarLocal('GET', url);
+    const r = await chamarLocal(method, url, body);
     if (!r.arquivo) throw new Error(r.json?.erro || `Erro ${r.status}`);
     return entregarArquivo({ ...r.arquivo, nome: nome || r.arquivo.nome });
   }
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${sessao.token}` } });
+  const r = await fetch(url, { method, headers: { Authorization: `Bearer ${sessao.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) { let e; try { e = (await r.json()).erro; } catch { e = `Erro ${r.status}`; } throw new Error(e); }
   const blob = await r.blob();
   const nomeArq = nome || (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'arquivo';
   return entregarArquivo({ nome: nomeArq, tipo: blob.type, dados: new Uint8Array(await blob.arrayBuffer()), inline: blob.type === 'application/pdf' });
 }
 
-// Impressão: Android usa o serviço de impressão do sistema (permite salvar em PDF)
-export function imprimir(html, titulo = 'Vorticis Emite NFS') {
-  if (nativo()?.imprimir) {
-    const css = [...document.styleSheets].map(s => { try { return [...s.cssRules].map(r => r.cssText).join('\n'); } catch { return ''; } }).join('\n');
-    return nativo().imprimir({ html: `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body style="background:#fff;padding:12px">${html}</body></html>`, titulo });
-  }
-  window.print();
+// Impressão: Android usa o serviço de impressão do sistema (permite salvar em PDF);
+// Windows/navegador abrem o documento numa janela própria e chamam a impressão (inclui "Salvar como PDF").
+export function imprimir(html, titulo = 'Vorticis Emite NFS', { documento = false } = {}) {
+  const css = documento ? '' : [...document.styleSheets].map(s => { try { return [...s.cssRules].map(r => r.cssText).join('\n'); } catch { return ''; } }).join('\n');
+  const pagina = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${titulo}</title><style>${css}body{background:#fff;margin:0;padding:${documento ? 0 : 12}px}</style></head><body>${html}</body></html>`;
+  if (nativo()?.imprimir) return nativo().imprimir({ html: pagina, titulo });
+  const url = URL.createObjectURL(new Blob([pagina.replace('</body>', '<script>window.onload=()=>setTimeout(()=>print(),300)<\/script></body>')], { type: 'text/html' }));
+  const w = window.open(url, '_blank');
+  if (!w) location.href = url;
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 const cache = new Map();

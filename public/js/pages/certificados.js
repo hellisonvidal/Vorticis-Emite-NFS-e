@@ -11,21 +11,22 @@ export async function paginaCertificados(view) {
   <div class="page-head"><div><h1>Certificados e procurações</h1><p>Certificados A1 ICP-Brasil (armazenados criptografados) e procurações eletrônicas para emitir em nome de terceiros</p></div></div>
   <div class="card">
     <div class="card-head"><h2>${icon('key', 'style="width:18px"')} Certificados digitais</h2><button class="btn primary" id="btnCert">${icon('plus')}Adicionar certificado A1</button></div>
-    ${certs.length ? `<div class="table-wrap"><table><thead><tr><th>Apelido / Titular</th><th>Documento</th><th>Emissor</th><th>Validade</th><th>Situação</th><th></th></tr></thead><tbody>
+    ${certs.length ? `<div class="table-wrap"><table><thead><tr><th>Apelido / Titular</th><th>Documento</th><th>Emissor</th><th>Validade</th><th>Situação</th><th>Cadeia ICP-Brasil</th><th></th></tr></thead><tbody>
       ${certs.map(c => `<tr><td><b>${esc(c.apelido || c.titular)}</b><div class="small muted">${esc(c.titular)}</div></td><td>${esc(c.tipo_doc)} ${fmtDoc(c.documento, c.tipo_doc)}</td><td class="small">${esc(c.emissor)}</td>
         <td>${dataBR(c.valido_ate)}<div class="small muted">${c.dias_restantes >= 0 ? `${c.dias_restantes} dias` : 'expirado'}</div></td><td>${badge(c.situacao, SIT)}</td>
-        <td><button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
+        <td>${c.cadeia?.completa ? `<span class="badge b-ok">completa</span><div class="small muted">${c.cadeia.niveis} nível(is)${c.cadeia.complementada ? ' · baixada via AIA' : ''}</div>` : `<span class="badge b-erro">incompleta</span><div class="small muted">${esc(c.cadeia?.aviso || 'o ADN pode recusar a conexão')}</div>`}</td>
+        <td class="nowrap">${c.cadeia?.completa ? '' : `<button class="btn sm" data-cad="${c.id}" title="Baixar ACs intermediárias pelo endereço AIA do certificado">${icon('refresh')}Completar cadeia</button>`}<button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
       : vazio('Nenhum certificado cadastrado. Sem certificado é possível emitir apenas em modo simulação.', 'key')}
     <div class="alert info" style="margin-top:14px">${icon('info')}<div class="small"><b class="t">Como funciona:</b> a API da Sefin Nacional exige autenticação mútua TLS com certificado ICP-Brasil e assinatura XML da DPS. O certificado pode ser da própria empresa (e-CNPJ) ou de um procurador (e-CPF/e-CNPJ) com procuração eletrônica válida para NFS-e. Login com usuário e senha dá acesso a este sistema; a transmissão sempre usa um certificado.</div></div>
   </div>
   <div class="card">
-    <div class="card-head"><h2>${icon('users', 'style="width:18px"')} Procurações eletrônicas</h2><button class="btn primary" id="btnProc" ${certs.length && estado.contribs.length ? '' : 'disabled'}>${icon('plus')}Nova procuração</button></div>
+    <div class="card-head"><h2>${icon('users', 'style="width:18px"')} Procurações eletrônicas</h2><div class="btns"><button class="btn" id="btnReceita" ${procs.length ? '' : 'disabled'} title="Consulta as procurações eletrônicas na Receita Federal via Integra Contador (SERPRO)">${icon('search')}Consultar vencimentos na Receita</button><button class="btn primary" id="btnProc" ${certs.length && estado.contribs.length ? '' : 'disabled'}>${icon('plus')}Nova procuração</button></div></div>
     ${procs.length ? `<div class="table-wrap"><table><thead><tr><th>Outorgante (empresa)</th><th>Procurador (certificado)</th><th>Escopo</th><th>Vigência</th><th>Situação</th><th></th></tr></thead><tbody>
       ${procs.map(p => { const venc = p.valida_ate && p.valida_ate < new Date().toISOString().slice(0, 10); return `<tr>
         <td><b>${esc(p.razao_social)}</b><div class="small muted">${fmtDoc(p.contrib_doc)}</div></td>
         <td>${esc(p.titular)}<div class="small muted">${fmtDoc(p.cert_doc)} · cert. até ${dataBR(p.cert_validade)}</div></td>
         <td>${p.escopo.split(',').map(e => `<span class="badge plain">${esc(e)}</span>`).join(' ')}</td>
-        <td>${p.valida_de ? dataBR(p.valida_de) : '—'} a ${p.valida_ate ? dataBR(p.valida_ate) : 'indeterminado'}</td>
+        <td>${p.valida_de ? dataBR(p.valida_de) : '—'} a ${p.valida_ate ? dataBR(p.valida_ate) : 'indeterminado'}<div class="small muted">${p.fonte_validade === 'receita' ? `confirmada na Receita${p.verificada_em ? ' em ' + dataBR(p.verificada_em.slice(0, 10)) : ''}` : 'informada manualmente'}</div>${p.sistemas ? `<div class="small muted" title="${esc(p.sistemas)}">${esc(p.sistemas.slice(0, 60))}</div>` : ''}</td>
         <td>${!p.ativo ? '<span class="badge">inativa</span>' : venc ? badge('vencido', SIT) : badge('valido', SIT)}</td>
         <td class="nowrap"><button class="btn sm ghost" data-tog="${p.id}" data-at="${p.ativo}">${p.ativo ? 'Desativar' : 'Ativar'}</button><button class="btn sm ghost danger" data-pdel="${p.id}">${icon('trash')}</button></td></tr>`; }).join('')}
       </tbody></table></div>` : vazio('Nenhuma procuração cadastrada. Use quando um contador/procurador emite em nome de clientes — é possível ter várias procurações por empresa.', 'users')}
@@ -62,6 +63,23 @@ export async function paginaCertificados(view) {
       toast('Procuração cadastrada.', 'ok'); await carregarContribs(); paginaCertificados(view);
     } }],
   });
+  $$('[data-cad]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await post(`/api/certificados/${b.dataset.cad}/cadeia`); toast(r.cadeia?.completa ? 'Cadeia ICP-Brasil completada.' : `Não foi possível completar: ${r.cadeia?.aviso || 'AIA indisponível'}`, r.cadeia?.completa ? 'ok' : 'error'); paginaCertificados(view); }
+    catch (e) { toast(e.message, 'error'); b.disabled = false; }
+  });
+  $('#btnReceita').onclick = async () => {
+    const btn = $('#btnReceita'); btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Consultando…';
+    try {
+      const r = await post('/api/procuracoes/verificar-receita', {});
+      await modal({ titulo: 'Procurações na Receita Federal (Integra Contador)', wide: true, corpo: `
+        ${r.trial ? `<div class="alert warn" style="margin-bottom:12px">${icon('alert')}<div>Modo <b>trial</b> do SERPRO: os dados abaixo são fictícios e as datas não foram gravadas. Configure a contratação em <b>Configurações → Integra Contador</b>.</div></div>` : ''}
+        <div class="table-wrap"><table><thead><tr><th>Empresa</th><th>Procurador</th><th>Válida até</th><th>Sistemas</th></tr></thead><tbody>
+        ${r.resultados.map(x => `<tr><td>${esc(x.empresa)}</td><td>${esc(x.procurador || '')}</td><td>${x.erro ? `<span class="badge b-erro">erro</span><div class="small">${esc(x.erro)}</div>` : x.validaAte ? dataBR(x.validaAte) : '<span class="badge b-aviso">não encontrada</span>'}</td><td class="small">${esc((x.sistemas || []).join('; '))}</td></tr>`).join('')}
+        </tbody></table></div>`, botoes: [{ texto: 'OK', cls: 'primary' }] });
+      await carregarContribs(); paginaCertificados(view);
+    } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Consultar vencimentos na Receita'; }
+  };
   $$('[data-del]').forEach(b => b.onclick = async () => { if (await confirmar('Excluir certificado', 'As procurações vinculadas a este certificado também serão removidas.', 'Excluir', 'danger')) { await del(`/api/certificados/${b.dataset.del}`); await carregarContribs(); paginaCertificados(view); } });
   $$('[data-pdel]').forEach(b => b.onclick = async () => { if (await confirmar('Excluir procuração', 'Remover esta procuração?', 'Excluir', 'danger')) { await del(`/api/procuracoes/${b.dataset.pdel}`); await carregarContribs(); paginaCertificados(view); } });
   $$('[data-tog]').forEach(b => b.onclick = async () => { await put(`/api/procuracoes/${b.dataset.tog}`, { ativo: b.dataset.at !== '1' }); await carregarContribs(); paginaCertificados(view); });

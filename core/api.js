@@ -11,7 +11,7 @@ import { lerPfx, resumoCert, completarCadeia } from './certificado.js';
 import { calcular, sugerirRetencoes, REGIMES, REG_ESP_TRIB, ALIQ_IBSCBS } from './tributos.js';
 import { montarDPS, montarCancelamento, assinar, chaveSimulada, nfseSimulada, dataHoraBR, idDPS } from './dps.js';
 import { criarSefin, decodificarXml } from './sefin.js';
-import { gerarDANFSe } from './danfse.js';
+import { gerarDANFSe, gerarDANFSeLote, OPCOES_DANFSE } from './danfse.js';
 import { resumoNFSe } from './xml.js';
 import { criarIntegraContador, procuracaoNFSe } from './integra-contador.js';
 import { T, buscar, sugestoes, nomeMunicipio, MUN, CTRIB, NBS } from './tabelas.js';
@@ -109,7 +109,7 @@ export function criarApi(P) {
     return { ...info, pfx, senha, row };
   }
 
-  GET('/api/status', () => ({ ok: true, app: APP_NOME, versao: P.versao || '1.0.0', plataforma: P.nome || 'servidor', usuarios: db.prepare('SELECT COUNT(*) n FROM usuarios').get().n }), true);
+  GET('/api/status', () => ({ ok: true, app: APP_NOME, versao: P.versao || '1.0.0', plataforma: P.nome || 'servidor', pdf: !!P.gerarPdf, usuarios: db.prepare('SELECT COUNT(*) n FROM usuarios').get().n }), true);
 
   POST('/api/auth/registrar', async ({ body: { nome, email, senha } }) => {
     if (!nome || !email || !senha) falha('Informe nome, e-mail e senha.');
@@ -446,7 +446,7 @@ export function criarApi(P) {
       const seq = db.prepare("SELECT COUNT(*) n FROM notas WHERE contribuinte_id = ? AND ambiente = 'simulacao' AND chave_acesso IS NOT NULL").get(c.id).n + 1;
       nNFSe = String(seq);
       chave = chaveSimulada({ cMun: c.cod_municipio, tipoDoc: c.tipo_doc, doc: c.documento, nNFSe: seq });
-      xmlNFSe = nfseSimulada({ chave, nNFSe, dpsAssinada: xmlAssinado, contrib: c, calc, municipio: nomeMunicipio(c.cod_municipio) });
+      xmlNFSe = nfseSimulada({ chave, nNFSe, dpsAssinada: xmlAssinado, contrib: c, calc, municipio: nomeMunicipio(c.cod_municipio), xTribNac: CTRIB.get(so(f.ctribnac))?.descricao });
       status = 'autorizada'; dhProc = dataHoraBR();
       mensagens.push({ codigo: 'SIM', descricao: 'Nota gerada em modo SIMULAÇÃO: sem validade fiscal, nada foi enviado à Receita/Sefin.' });
     } else {
@@ -547,11 +547,48 @@ export function criarApi(P) {
     return { arquivo: { nome: `${tipo.toUpperCase()}-${n.chave_acesso || n.id_dps || n.id}.xml`, tipo: 'application/xml', dados: xml.startsWith('<?xml') ? xml : `<?xml version="1.0" encoding="UTF-8"?>${xml}` } };
   });
   // DANFSe v2.0 gerado localmente a partir do XML (NT 008/2026: a API oficial foi suspensa em 03/08/2026)
-  GET('/api/notas/:id/danfse', ({ user, params }) => {
+  const opcoesDanfse = uid => ({ ...OPCOES_DANFSE, ...(cfgLer(uid, 'danfse') || {}) });
+  // Entrega o DANFSe como HTML (pré-visualização/impressão) ou PDF (quando a plataforma sabe gerar PDF)
+  async function entregaDanfse(html, nome, formato) {
+    if (formato !== 'pdf') return { html, nome: `${nome}.html`, pdf: !!P.gerarPdf };
+    if (!P.gerarPdf) falha('Esta plataforma não gera PDF diretamente: use "Imprimir DANFSe" e escolha "Salvar como PDF".', 501);
+    const pagina = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nome}</title></head><body style="margin:0;background:#fff">${html}</body></html>`;
+    return { arquivo: { nome: `${nome}.pdf`, tipo: 'application/pdf', dados: await P.gerarPdf(pagina), inline: true } };
+  }
+  GET('/api/config/danfse', ({ user }) => ({ ...opcoesDanfse(user.id), pdf: !!P.gerarPdf }));
+  PUT('/api/config/danfse', ({ user, body }) => {
+    const v = {};
+    for (const k of Object.keys(OPCOES_DANFSE)) v[k] = body[k] === undefined ? opcoesDanfse(user.id)[k] : !!body[k] && body[k] !== 'false';
+    cfgGravar(user.id, 'danfse', v);
+    return v;
+  });
+  GET('/api/notas/:id/danfse', ({ user, params, query }) => {
     const n = nota(user.id, params.id);
     if (!n.xml_nfse) falha('DANFSe disponível apenas para notas autorizadas (com XML da NFS-e).', 404);
-    const html = gerarDANFSe(n.xml_nfse, { situacao: n.status, simulacao: n.ambiente === 'simulacao' });
-    return { html, nome: `DANFSe-${n.chave_acesso || n.id}.html` };
+    const html = gerarDANFSe(n.xml_nfse, { ...opcoesDanfse(user.id), situacao: n.status, simulacao: n.ambiente === 'simulacao' });
+    return entregaDanfse(html, `DANFSe-${n.nnfse ? n.nnfse + '-' : ''}${n.chave_acesso || n.id}`, query.formato);
+  });
+  // Vários DANFSe num só documento (uma página por nota): por lista de ids ou pelos mesmos filtros da listagem
+  POST('/api/danfse/lote', ({ user, body, query }) => {
+    let ids = (body.ids || []).map(Number).filter(Boolean);
+    if (!ids.length) falha('Selecione ao menos uma nota.');
+    if (ids.length > 200) falha('Máximo de 200 notas por lote.');
+    const ph = ids.map(() => '?').join(',');
+    const notas = db.prepare(`SELECT id, xml_nfse, status, ambiente FROM notas WHERE usuario_id = ? AND id IN (${ph}) AND xml_nfse IS NOT NULL ORDER BY competencia, CAST(nnfse AS INTEGER), id`).all(user.id, ...ids);
+    if (!notas.length) falha('Nenhuma das notas selecionadas tem XML de NFS-e autorizada.', 404);
+    const html = gerarDANFSeLote(notas.map(n => ({ xml: n.xml_nfse, situacao: n.status, simulacao: n.ambiente === 'simulacao' })), opcoesDanfse(user.id));
+    return entregaDanfse(html, `DANFSe-lote-${notas.length}-notas`, query.formato || body.formato).then(r => ({ ...r, quantidade: notas.length, ignoradas: ids.length - notas.length }));
+  });
+  // DANFSe de qualquer XML de NFS-e (ex.: notas recebidas como tomador ou baixadas do portal)
+  POST('/api/danfse/xml', ({ user, body, query }) => {
+    let xml = String(body.xml || '').replace(/^\uFEFF/, '').trim();
+    if (!xml) falha('Informe o XML da NFS-e.');
+    if (!xml.startsWith('<')) { try { xml = decodificarXml(xml); } catch { falha('Conteúdo não é um XML de NFS-e.'); } }
+    let html;
+    try { html = gerarDANFSe(xml, { ...opcoesDanfse(user.id), situacao: ['cancelada', 'substituida'].includes(body.situacao) ? body.situacao : 'autorizada' }); }
+    catch (e) { falha(`Não foi possível gerar o DANFSe: ${e.message}`); }
+    const chave = (xml.match(/Id="NFS(\d{50})"/) || [])[1] || 'nfse';
+    return entregaDanfse(html, `DANFSe-${chave}`, query.formato || body.formato);
   });
   POST('/api/notas/:id/sincronizar', async ({ user, params }) => {
     const n = nota(user.id, params.id);
@@ -631,6 +668,7 @@ export function criarApi(P) {
       porStatus: q(`SELECT status, COUNT(*) qtd, SUM(valor_servico) total ${base} GROUP BY status`),
       ultimas: q(`SELECT id, status, nnfse, tomador_nome, valor_servico, competencia, ambiente, criado_em ${base} ORDER BY id DESC LIMIT 8`),
       alertas: {
+        pendentes: db.prepare("SELECT COUNT(*) n FROM notas WHERE usuario_id = ? AND status = 'pendente'").get(user.id).n,
         certs: db.prepare('SELECT * FROM certificados WHERE usuario_id = ?').all(user.id).map(resumoCert).filter(c => c.situacao !== 'valido'),
         procsVenc: db.prepare(`SELECT p.*, ct.razao_social FROM procuracoes p JOIN contribuintes ct ON ct.id = p.contribuinte_id WHERE p.usuario_id = ? AND p.ativo = 1 AND p.valida_ate IS NOT NULL AND p.valida_ate <= date('now','+30 day')`).all(user.id),
       },

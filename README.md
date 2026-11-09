@@ -34,8 +34,24 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
 - **Copiar a última nota:** por empresa ou por tomador. Depois é só trocar o tomador e os valores e emitir.
 - **Consultas:** tabelas oficiais da Lista Nacional (cTribNac), NBS 2.0, correlação Item × NBS × IBS/CBS, cClassTrib, cIndOp, municípios IBGE e códigos municipais.
 - **Notas:**
-  - XML da DPS e da NFS-e, DANFSe oficial e espelho para impressão;
-  - cancelamento, substituição e consulta da situação na Sefin.
+  - XML da DPS e da NFS-e;
+  - cancelamento, substituição e consulta da situação na Sefin;
+  - nota **pendente** quando a resposta da Sefin se perde (queda de rede ou timeout), recuperada depois pelo número da DPS.
+- **DANFSe v2.0** (NT SE/CGNFS-e nº 008/2026 v1.02), gerado no próprio app porque a API oficial foi suspensa em 03/08/2026:
+  - todos os blocos e campos da NT, em A4 de página única, com QR Code da consulta pública e logomarca oficial da NFS-e;
+  - regras da NT: tarja "NFS-e SEM VALIDADE JURÍDICA" (produção restrita), marca d'água CANCELADA/SUBSTITUÍDA, blocos não identificados, destinatário igual ao tomador, operação não sujeita ao ISSQN, linha de PIS/COFINS até 2026, tratamento de `tpRetPisCofins` da v1.02, NFS-e substituída, obra, imóvel e evento em Informações Complementares, e totais aproximados da Lei 12.741/2012;
+  - opções em *Configurações*: canhoto (item 2.1.13), supressão de endereço e e-mail (Nota 1) e de linhas sem dados (Nota 5);
+  - impressão, **PDF direto** (Windows e Android; no navegador, use "Salvar como PDF"), **impressão em lote** das notas selecionadas e **DANFSe de qualquer XML** de NFS-e, como notas recebidas como tomador.
+- **Numeração (DPS e NFS-e):**
+  - consulta à Sefin (`HEAD /dps`) antes de cada envio, para não reutilizar números;
+  - verificação e ajuste do próximo nº de DPS, com recuperação automática da nota em caso de duplicidade (E0014);
+  - importação das notas da empresa pelo ADN (distribuição por NSU), incluindo cancelamentos e substituições;
+  - validação da faixa da série: 00001–49999 para aplicativo próprio.
+- **Produção:**
+  - diagnóstico por empresa: cadastro, numeração, certificado, cadeia ICP-Brasil, procuração, convênio do município e teste de comunicação mTLS;
+  - ativação do ambiente de produção com checklist.
+- **Certificados:** a cadeia ICP-Brasil é completada automaticamente pelo endereço AIA do certificado, porque o ADN recusa conexões com a cadeia incompleta.
+- **Procurações na Receita:** consulta da data de vencimento e dos sistemas autorizados pelo **Integra Contador (SERPRO)**, serviço OBTERPROCURACAO41. Exige contratação na Loja SERPRO; o modo trial devolve dados fictícios.
 - **Relatórios e painel:**
   - apuração de ISS, retenções e IBS/CBS, com exportação em CSV;
   - painel com indicadores e gráficos;
@@ -79,6 +95,9 @@ core/        núcleo compartilhado (roda no Node e no WebView do Android)
   tributos.js  motor fiscal: regimes, ISS, federais, IBS/CBS
   dps.js       XML da DPS e dos eventos + assinatura XMLDSig (C14N), sem dependências nativas
   sefin.js     cliente das APIs Sefin Nacional/ADN (o transporte mTLS vem da plataforma)
+  danfse.js    DANFSe v2.0 (NT 008/2026) em HTML A4; o PDF é gerado pela plataforma (Electron/Android)
+  xml.js       leitura de XML da NFS-e (@xmldom/xmldom)
+  integra-contador.js  procurações eletrônicas via Integra Contador (SERPRO)
   banco.js     esquema SQLite + adaptadores node:sqlite (Windows) e sql.js/WASM (Android)
   seguranca.js PBKDF2 / AES-GCM via WebCrypto
   data/        tabelas oficiais convertidas (gov.br/nfse)
@@ -87,7 +106,7 @@ desktop/     processo principal do Electron (janela, menu, downloads)
 mobile/      app Android (Capacitor)
   src/main.js  inicialização: sql.js + IndexedDB + ponte nativa
   build.js     empacota o frontend e o núcleo em mobile/www
-  android/     projeto Android; plugin nativo VorticisNativoPlugin.java (mTLS, salvar, compartilhar, imprimir)
+  android/     projeto Android; plugin nativo VorticisNativoPlugin.java (mTLS, salvar, compartilhar, imprimir, PDF)
 public/      interface (JS puro, sem build) + Chart.js
 scripts/     importar_tabelas.py, gerar-icones.cjs, demo.js
 docs-oficiais/ XSDs v1.01 e planilhas oficiais
@@ -122,7 +141,9 @@ base64 -w0 vorticis.jks
 
 - **A transmissão à Sefin sempre exige certificado digital ICP-Brasil**, que pode ser da empresa ou de um procurador. Login com usuário e senha dá acesso ao app, mas não substitui o certificado. Sem certificado, só o modo simulação funciona.
 - **Procuração:** precisa estar registrada oficialmente (Procuração Eletrônica com o serviço NFS-e). O app só associa o certificado do procurador à empresa.
-- **Antes de usar em produção**, valide em **Produção restrita** com o seu certificado real. Se a Sefin rejeitar a assinatura (erro E0714), troque o algoritmo para SHA-256 no cadastro da empresa.
+- **Antes de usar em produção**, valide em **Produção restrita** com o seu certificado real (use *Empresas → Diagnóstico*). Se a Sefin rejeitar a assinatura (erro E0714), troque o algoritmo para SHA-256 no cadastro da empresa.
+- **Numeração:** se usar o app em mais de um aparelho, use uma **série diferente em cada um**. O Emissor Web da Receita usa as séries 70000–79999, então não há conflito com ele.
+- **Certificado A3** (token ou cartão) não é suportado. A emissão por API exige certificado A1.
 - **Alíquotas de IBS/CBS a partir de 2027** e as reduções por cClassTrib são **valores de referência**. Confira antes de emitir.
 - **No Android, os dados ficam só no aparelho.** Faça backups regulares em *Configurações → Backup do banco de dados*.
 - **Atualização das tabelas oficiais:** baixe os novos anexos de https://www.gov.br/nfse/pt-br/biblioteca/documentacao-tecnica para `docs-oficiais/` e rode `npm run tabelas`.

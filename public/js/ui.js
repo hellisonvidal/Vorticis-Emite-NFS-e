@@ -24,7 +24,7 @@ export const fmtCTrib = v => { const d = so(v); return d.length === 6 ? `${d.sli
 export const fmtNBS = v => { const d = so(v); return d.length === 9 ? `${d[0]}.${d.slice(1, 5)}.${d.slice(5, 7)}.${d.slice(7)}` : v || ''; };
 export const fmtChave = v => String(v || '').replace(/(.{5})/g, '$1 ').trim();
 
-export const STATUS = { autorizada: 'Autorizada', rejeitada: 'Rejeitada', rascunho: 'Rascunho', cancelada: 'Cancelada', substituida: 'Substituída' };
+export const STATUS = { autorizada: 'Autorizada', pendente: 'Pendente (sem resposta)', rejeitada: 'Rejeitada', rascunho: 'Rascunho', cancelada: 'Cancelada', substituida: 'Substituída' };
 export const AMB = { simulacao: 'Simulação', homologacao: 'Produção restrita', producao: 'Produção' };
 export const badge = (k, map = STATUS) => `<span class="badge b-${esc(k)}">${esc(map[k] || k)}</span>`;
 

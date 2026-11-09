@@ -17,9 +17,19 @@ const pastaDados = () => path.join(app.getPath('userData'), 'dados');
 async function iniciar() {
   process.removeAllListeners('warning'); // oculta o aviso "SQLite is experimental"
   const { iniciarServidor } = await import('../server/index.js');
-  servidor = await iniciarServidor({ porta: 0, host: '127.0.0.1', dataDir: pastaDados(), nome: 'Windows' });
+  servidor = await iniciarServidor({ porta: 0, host: '127.0.0.1', dataDir: pastaDados(), nome: 'Windows', gerarPdf });
   base = `http://127.0.0.1:${servidor.porta}`;
   criarJanela();
+}
+
+// PDF do DANFSe: renderiza o HTML numa janela oculta (sem JavaScript) e imprime em A4 com as margens do @page
+async function gerarPdf(html) {
+  const w = new BrowserWindow({ show: false, width: 900, height: 1200, webPreferences: { sandbox: true, javascript: false, contextIsolation: true } });
+  try {
+    await w.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64'));
+    const pdf = await w.webContents.printToPDF({ pageSize: 'A4', landscape: false, printBackground: true, preferCSSPageSize: true });
+    return new Uint8Array(pdf);
+  } finally { w.destroy(); }
 }
 
 function criarJanela() {

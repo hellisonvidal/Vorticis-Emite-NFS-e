@@ -1,7 +1,7 @@
 {
   "name": "vorticis-emite-nfs",
   "productName": "Vorticis Emite NFS",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Vorticis Emite NFS - emissor de NFS-e Padrão Nacional com IBS/CBS (Windows, Android e navegador)",
   "author": "Vorticis",
   "license": "UNLICENSED",

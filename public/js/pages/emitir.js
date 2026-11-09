@@ -431,6 +431,17 @@ export async function paginaEmitir(view, params) {
     const btn = $('#btnEmitir'); btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Transmitindo…';
     try {
       const r = await post('/api/notas/emitir', p);
+      if (r.status === 'pendente') {
+        const ac = await modal({
+          titulo: `${icon('alert', 'style="width:22px;color:var(--warning)"')} Sem resposta da Sefin Nacional`,
+          corpo: `<p>A DPS <b>${esc(r.idDps)}</b> foi enviada, mas a resposta não chegou (falha de rede ou tempo esgotado).</p>
+            <div class="alert warn">${icon('info')}<div>A nota ficou <b>PENDENTE</b>. <b>Não emita outra nota igual</b>: a Sefin pode ter autorizado esta DPS. Clique em "Consultar agora" (ou depois, em Notas emitidas) para confirmar pelo número da DPS — se ela não tiver sido processada, a nota volta para correção sem perder a numeração.</div></div>`,
+          botoes: [{ texto: 'Depois', valor: 'depois' }, { texto: `${icon('refresh')}Consultar agora`, cls: 'primary', valor: 'consultar' }],
+        });
+        if (ac === 'consultar') { try { const s = await post(`/api/notas/${r.id}/sincronizar`); toast(s.mensagem || `Situação: ${s.status}`, 'ok'); } catch (e) { toast(e.message, 'error'); } }
+        location.hash = `#/notas?id=${r.id}`;
+        return;
+      }
       const acao = await modal({
         titulo: `${icon('check', 'style="width:22px;color:var(--success)"')} NFS-e autorizada`,
         corpo: `<div class="grid g2"><div><div class="muted small">Número</div><h2>${esc(r.nNFSe || '—')}</h2></div><div><div class="muted small">DPS</div><b>${esc(r.idDps)}</b></div>

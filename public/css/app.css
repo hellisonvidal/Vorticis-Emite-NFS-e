@@ -100,10 +100,10 @@ legend { padding: 0 6px; font-weight: 600; font-size: 12.5px; color: var(--muted
 .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; font-size: 11.5px; font-weight: 600; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
 .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.plain::before { display: none; }
-.b-autorizada, .b-valido, .b-producao { background: var(--success-soft); color: var(--success); border-color: transparent; }
-.b-rejeitada, .b-vencido, .b-cancelada { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
-.b-rascunho, .b-vencendo, .b-homologacao { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
-.b-substituida, .b-simulacao { background: var(--info-soft); color: var(--info); border-color: transparent; }
+.b-autorizada, .b-valido, .b-producao, .b-ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
+.b-rejeitada, .b-vencido, .b-cancelada, .b-erro { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.b-rascunho, .b-vencendo, .b-homologacao, .b-pendente, .b-aviso { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+.b-substituida, .b-simulacao, .b-info { background: var(--info-soft); color: var(--info); border-color: transparent; }
 .alert { border-radius: 12px; padding: 12px 14px; display: flex; gap: 10px; align-items: flex-start; border: 1px solid transparent; }
 .alert svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
 .alert.info { background: var(--info-soft); color: var(--info); } .alert.warn { background: var(--warning-soft); color: var(--warning); }
@@ -206,3 +206,8 @@ pre.xml { background: var(--surface-2); border: 1px solid var(--border); border-
   .g2, .g3, .g4, .g6 { grid-template-columns: 1fr; } .span2, .span3, .span4 { grid-column: auto; }
   .login { grid-template-columns: 1fr; } .login .hero { display: none; }
 }
+
+.danfse-frame { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+
+.lote-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px; background: var(--primary-soft, rgba(37,99,235,.08)); }
+th.sel, td.sel { width: 34px; text-align: center; }

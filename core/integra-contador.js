@@ -48,14 +48,19 @@ export function criarIntegraContador(http) {
       headers.Authorization = `Bearer ${t.access}`;
       if (t.jwt) headers.jwt_token = t.jwt;
     }
-    const contratante = String(p.contratante).replace(/\D/g, '');
+    // O modo trial só aceita o cenário de demonstração da documentação SERPRO (dados fictícios)
+    const so = v => String(v).replace(/\D/g, '');
+    const contratante = trial ? '99999999999999' : so(p.contratante);
+    const outorgante = trial ? '99999999999999' : so(p.outorgante);
+    const outorgado = trial ? '99999999999' : so(p.outorgado);
     const pedido = {
       contratante: { numero: contratante, tipo: tipoDoc(contratante) },
       autorPedidoDados: { numero: contratante, tipo: tipoDoc(contratante) },
-      contribuinte: { numero: String(p.outorgante).replace(/\D/g, ''), tipo: tipoDoc(p.outorgante) },
+      // Como no cenário oficial, o contribuinte da consulta é o outorgado (quem recebeu a procuração)
+      contribuinte: { numero: outorgado, tipo: tipoDoc(outorgado) },
       pedidoDados: {
         idSistema: 'PROCURACOES', idServico: 'OBTERPROCURACAO41', versaoSistema: '1',
-        dados: JSON.stringify({ outorgante: String(p.outorgante).replace(/\D/g, ''), tipoOutorgante: String(tipoDoc(p.outorgante)), outorgado: String(p.outorgado).replace(/\D/g, ''), tipoOutorgado: String(tipoDoc(p.outorgado)) }),
+        dados: JSON.stringify({ outorgante, tipoOutorgante: String(tipoDoc(outorgante)), outorgado, tipoOutorgado: String(tipoDoc(outorgado)) }),
       },
     };
     const r = await http({
@@ -64,7 +69,8 @@ export function criarIntegraContador(http) {
     });
     const j = corpo(r);
     const mensagens = (j?.mensagens || []).map(m => `${m.codigo || ''} ${m.texto || ''}`.trim());
-    if (r.status !== 200) throw Object.assign(new Error(`Integra Contador respondeu HTTP ${r.status}: ${mensagens.join('; ') || 'erro desconhecido'}`), { status: 502 });
+    const st = Number(j?.status || r.status);
+    if (r.status !== 200 || st >= 300) throw Object.assign(new Error(`Integra Contador recusou a consulta (status ${st}): ${mensagens.join('; ') || 'erro desconhecido'}`), { status: 502 });
     let lista = [];
     try { lista = typeof j.dados === 'string' ? JSON.parse(j.dados || '[]') : (j.dados || []); } catch { lista = []; }
     if (!Array.isArray(lista)) lista = [lista];

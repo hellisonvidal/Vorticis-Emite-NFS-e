@@ -17,6 +17,7 @@ export async function paginaDashboard(view, params) {
   const var_ = (a, b) => { if (!b) return a ? '<span class="up">novo</span>' : '<span class="muted">—</span>'; const p = (a - b) / b * 100; return `<span class="${p >= 0 ? 'up' : 'down'}">${p >= 0 ? '▲' : '▼'} ${num(Math.abs(p), 1)}%</span> <span class="muted">vs mês anterior</span>`; };
   const ticket = d.mes.qtd ? d.mes.total / d.mes.qtd : 0;
   const alertas = [
+    ...(d.alertas.pendentes ? [`<b>${d.alertas.pendentes} nota(s) pendente(s)</b> sem resposta da Sefin. <a href="#/notas?status=pendente">Consultar agora</a> para não perder a numeração.`] : []),
     ...d.alertas.certs.map(x => `Certificado <b>${esc(x.apelido || x.titular)}</b> ${x.situacao === 'vencido' ? 'vencido' : `vence em ${x.dias_restantes} dia(s)`} (${dataBR(x.valido_ate)}).`),
     ...d.alertas.procsVenc.map(p => `Procuração de <b>${esc(p.razao_social)}</b> vence em ${dataBR(p.valida_ate)}.`),
   ];

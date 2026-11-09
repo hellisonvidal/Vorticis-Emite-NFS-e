@@ -2,6 +2,7 @@ import { get, post, put, del, cached } from '../api.js';
 import { $, esc, icon, modal, toast, confirmar, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, badge, AMB, dataBR, vazio } from '../ui.js';
 import { estado } from '../estado.js';
 import { carregarContribs } from '../app.js';
+import { abrirNumeracao, abrirDiagnostico } from './producao.js';
 
 export async function paginaEmpresas(view, params) {
   await carregarContribs();
@@ -18,10 +19,12 @@ export async function paginaEmpresas(view, params) {
         <div><span class="muted">Acesso:</span> ${c.certificado ? `${icon('key', 'style="width:13px;vertical-align:-2px"')} ${esc(c.certificado.titular)} ${badge(c.certificado.situacao, { valido: 'válido', vencendo: 'vencendo', vencido: 'vencido' })}` : c.procuracoes.length ? `${c.procuracoes.length} procuração(ões)` : '<span class="muted">sem certificado (somente simulação)</span>'}</div>
         <div><span class="muted">IBS/CBS:</span> ${c.ibscbs_ativo ? `ativo · cClassTrib ${esc(c.cclasstrib_padrao)} · cIndOp ${esc(c.ind_op_padrao)}` : 'não informado'}</div>
       </div>
-      <div class="btns" style="margin-top:14px"><button class="btn sm" data-ed="${c.id}">${icon('edit')}Editar</button><button class="btn sm" data-sel="${c.id}">Usar esta</button>${c.ativo ? `<button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button>` : '<span class="badge">inativa</span>'}</div>
+      <div class="btns" style="margin-top:14px"><button class="btn sm" data-ed="${c.id}">${icon('edit')}Editar</button><button class="btn sm" data-num="${c.id}">${icon('list')}Numeração</button><button class="btn sm" data-diag="${c.id}">${icon('shield')}Diagnóstico</button><button class="btn sm" data-sel="${c.id}">Usar esta</button>${c.ativo ? `<button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button>` : '<span class="badge">inativa</span>'}</div>
     </div>`).join('')}</div>` : `<div class="card">${vazio('Nenhuma empresa cadastrada. Cadastre a primeira para começar a emitir.', 'building')}</div>`}`;
   $('#btnNova').onclick = () => formEmpresa();
   view.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => formEmpresa(lista.find(c => c.id === +b.dataset.ed)));
+  view.querySelectorAll('[data-num]').forEach(b => b.onclick = () => abrirNumeracao(lista.find(c => c.id === +b.dataset.num), () => paginaEmpresas(view, new URLSearchParams())).catch(e => toast(e.message, 'error')));
+  view.querySelectorAll('[data-diag]').forEach(b => b.onclick = () => abrirDiagnostico(lista.find(c => c.id === +b.dataset.diag), () => paginaEmpresas(view, new URLSearchParams())).catch(e => toast(e.message, 'error')));
   view.querySelectorAll('[data-sel]').forEach(b => b.onclick = () => { estado.setContrib(b.dataset.sel); location.hash = '#/dashboard'; location.reload(); });
   view.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
     if (!await confirmar('Remover empresa', 'Empresas com notas autorizadas são apenas inativadas. Continuar?', 'Remover', 'danger')) return;

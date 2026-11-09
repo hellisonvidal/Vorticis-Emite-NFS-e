@@ -158,7 +158,7 @@ export async function completarCadeia(pfxBytes, senha, baixar) {
   for (let i = 0; i < 5 && !a.completa; i++) {
     const ultimo = a.cadeia[a.cadeia.length - 1];
     const urls = urlsAIA(ultimo);
-    if (!urls.length) { aviso = 'Certificado sem endereço AIA para obter a AC emissora.'; break; }
+    if (!urls.length) { aviso = 'Certificado sem endereço AIA para obter a AC emissora'; break; }
     let novos = [];
     for (const u of urls) {
       try { novos = certsDeArquivo(await baixar(u)); if (novos.length) break; } catch (e) { aviso = `Falha ao baixar ${u}: ${e.message}`; }

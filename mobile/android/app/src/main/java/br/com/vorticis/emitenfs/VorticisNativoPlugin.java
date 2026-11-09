@@ -10,6 +10,7 @@ import android.os.Environment;
 import android.print.PrintAttributes;
 import android.print.PrintDocumentAdapter;
 import android.print.PrintManager;
+import android.print.PdfExportador;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.WebView;
@@ -29,6 +30,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.FileInputStream;
 import java.net.URL;
 import java.security.KeyStore;
 import java.util.Iterator;
@@ -46,6 +48,7 @@ import javax.net.ssl.SSLContext;
  *  - salvar: grava arquivos (XML, CSV, PDF, backup) em Downloads/Vorticis
  *  - compartilhar: abre o compartilhamento do Android (e-mail, WhatsApp, Drive…)
  *  - imprimir: serviço de impressão do sistema (inclui "Salvar como PDF")
+ *  - pdf: gera o PDF A4 de um HTML diretamente (DANFSe), sem diálogo
  */
 @CapacitorPlugin(name = "VorticisNativo")
 public class VorticisNativoPlugin extends Plugin {
@@ -184,6 +187,49 @@ public class VorticisNativoPlugin extends Plugin {
                 }
             });
             webViewImpressao.loadDataWithBaseURL("https://localhost/", html, "text/html", "UTF-8", null);
+        });
+    }
+
+    // Gera o PDF (A4) do HTML informado, sem diálogo – usado para o DANFSe em PDF
+    private WebView webViewPdf;
+
+    @PluginMethod
+    public void pdf(PluginCall call) {
+        String html = call.getString("html", "");
+        getActivity().runOnUiThread(() -> {
+            webViewPdf = new WebView(getActivity());
+            webViewPdf.getSettings().setJavaScriptEnabled(false);
+            webViewPdf.setWebViewClient(new WebViewClient() {
+                private boolean feito = false;
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    if (feito) return;
+                    feito = true;
+                    try {
+                        File destino = File.createTempFile("danfse", ".pdf", getContext().getCacheDir());
+                        PrintAttributes attrs = new PrintAttributes.Builder()
+                            .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                            .setResolution(new PrintAttributes.Resolution("pdf", "pdf", 600, 600))
+                            .setMinMargins(PrintAttributes.Margins.NO_MARGINS).build();
+                        PdfExportador.exportar(view.createPrintDocumentAdapter("DANFSe"), attrs, destino, new PdfExportador.Retorno() {
+                            @Override public void ok(File arquivo) {
+                                try {
+                                    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                                    try (InputStream in = new FileInputStream(arquivo)) { byte[] b = new byte[16384]; int n; while ((n = in.read(b)) > 0) buf.write(b, 0, n); }
+                                    byte[] bytes = buf.toByteArray();
+                                    arquivo.delete();
+                                    JSObject r = new JSObject();
+                                    r.put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP));
+                                    call.resolve(r);
+                                } catch (Exception e) { call.reject("Falha ao ler o PDF: " + e.getMessage()); }
+                                webViewPdf = null;
+                            }
+                            @Override public void erro(String m) { call.reject("Falha ao gerar o PDF: " + m); webViewPdf = null; }
+                        });
+                    } catch (Exception e) { call.reject("Falha ao gerar o PDF: " + e.getMessage()); webViewPdf = null; }
+                }
+            });
+            webViewPdf.loadDataWithBaseURL("https://localhost/", html, "text/html", "UTF-8", null);
         });
     }
 

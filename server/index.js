@@ -44,12 +44,12 @@ function chaveMestra(dataDir) {
   return unhex(fs.readFileSync(f, 'utf8').trim());
 }
 
-export function criarAplicacao({ dataDir = process.env.NFSE_DATA_DIR || path.resolve('data'), nome = 'servidor' } = {}) {
+export function criarAplicacao({ dataDir = process.env.NFSE_DATA_DIR || path.resolve('data'), nome = 'servidor', gerarPdf } = {}) {
   fs.mkdirSync(dataDir, { recursive: true });
   const arquivoDb = path.join(dataDir, 'vorticis.db');
   const raw = new DatabaseSync(arquivoDb);
   const api = criarApi({
-    nome, versao: VERSAO, db: adaptarNodeSqlite(raw), cofre: criarCofre(chaveMestra(dataDir)), http,
+    nome, versao: VERSAO, db: adaptarNodeSqlite(raw), cofre: criarCofre(chaveMestra(dataDir)), http, gerarPdf,
     exportarBanco: () => { raw.exec('PRAGMA wal_checkpoint(FULL)'); return new Uint8Array(fs.readFileSync(arquivoDb)); },
   });
 

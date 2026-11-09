@@ -54,6 +54,7 @@ async function iniciar() {
   const api = criarApi({
     nome: 'Android', versao: __VERSAO__, db: adaptarSqlJs(raw, agendar), cofre: criarCofre(new Uint8Array(chave)), http,
     exportarBanco: () => raw.export(),
+    gerarPdf: async html => unb64((await Nativo.pdf({ html })).base64 || ''),
   });
   globalThis.__vorticisApi = api;
 }
