@@ -139,9 +139,21 @@ export function criarSefin(http) {
       if (r.status === 404 || r.status === 405) r = await req(`${AMBIENTES[amb].adn}/parametrizacao/${cMun}/convenio`, { cert });
       return { ok: r.status === 200, status: r.status, dados: r.json || r.text, erros: r.status === 200 ? [] : erros(r) };
     },
-    async parametrosMunicipais(amb, cert, cMun, sufixo) {
-      const r = await req(`${AMBIENTES[amb].sefin}/parametros_municipais/${cMun}/${sufixo}`, { cert });
-      return { ok: r.status === 200, status: r.status, dados: r.json || r.text };
+    /** Tenta as rotas em ordem (Sefin e, se ela não tiver a rota, ADN) e devolve a primeira resposta 200. */
+    async parametrosMunicipais(amb, cert, cMun, sufixos) {
+      const tentativas = [];
+      let ultima = null;
+      for (const suf of [].concat(sufixos).filter(Boolean)) {
+        for (const base of [`${AMBIENTES[amb].sefin}/parametros_municipais`, `${AMBIENTES[amb].adn}/parametrizacao`]) {
+          const url = `${base}/${cMun}/${suf}`;
+          const r = await req(url, { cert });
+          tentativas.push({ url, status: r.status });
+          ultima = { ok: r.status === 200, status: r.status, dados: r.json || r.text, rota: url };
+          if (r.status === 200) return { ...ultima, tentativas };
+          if (r.status !== 404 && r.status !== 405) return { ...ultima, tentativas, erros: erros(r) };
+        }
+      }
+      return { ...(ultima || { ok: false, status: 0, dados: null }), tentativas };
     },
   };
   return api;

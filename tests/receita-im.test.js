@@ -69,7 +69,7 @@ test('consulta CNPJ com fontes alternativas, endereço completo e IM das NFS-e',
   assert.equal((await call('GET', '/api/consulta/cnpj/11222333000181', null, token)).im, '998877');
 
   // 3) completar em lote: só campos vazios, IM pelas notas; não sobrescreve o que o usuário digitou
-  const id = (await call('POST', '/api/tomadores', { tipo_doc: 'CNPJ', documento: '19131243000197', nome: 'Nome digitado', email: 'meu@email.com' }, token)).id;
+  const id = (await call('POST', '/api/tomadores', { contribuinte_id: c.id, tipo_doc: 'CNPJ', documento: '19131243000197', nome: 'Nome digitado', email: 'meu@email.com' }, token)).id;
   const r = await call('POST', '/api/cadastros/completar', { tipo: 'tomadores' }, token);
   assert.equal(r.atualizados, 1);
   assert.equal(r.ims, 1);

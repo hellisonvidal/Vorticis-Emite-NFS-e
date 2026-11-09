@@ -15,7 +15,7 @@ if (process.platform === 'win32') app.setAppUserModelId('br.com.vorticis.emitenf
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
-let janela, servidor, base, saindo = false;
+let janela, servidor, base, saindo = false, perguntando = false;
 const pastaDados = () => path.join(app.getPath('userData'), 'dados');
 
 async function iniciar() {
@@ -36,6 +36,20 @@ async function gerarPdf(html) {
   } finally { w.destroy(); }
 }
 
+const nativo = () => dialog.showMessageBoxSync(janela, { type: 'question', title: NOME, message: 'Deseja realmente sair do Vorticis Emite NFS?', detail: 'Notas em digitação que não foram salvas como rascunho serão perdidas.', buttons: ['Sair', 'Cancelar'], defaultId: 1, cancelId: 1, noLink: true }) === 0;
+async function confirmarSaida() {
+  const wc = janela.webContents;
+  if (wc.isCrashed?.() || wc.isLoading()) return nativo();
+  const espera = ms => new Promise(r => setTimeout(() => r('tempo'), ms));
+  try {
+    const tem = await Promise.race([wc.executeJavaScript("typeof globalThis.__vorticisConfirmarSaida === 'function'", true), espera(1500)]);
+    if (tem !== true) return nativo();
+    if (janela.isMinimized()) janela.restore();
+    janela.show(); janela.focus();
+    return (await wc.executeJavaScript('globalThis.__vorticisConfirmarSaida()', true)) === true;
+  } catch { return nativo(); }
+}
+
 function criarJanela() {
   janela = new BrowserWindow({
     width: 1360, height: 880, minWidth: 900, minHeight: 600, title: NOME, show: false,
@@ -44,12 +58,16 @@ function criarJanela() {
   });
   janela.once('ready-to-show', () => { janela.maximize(); janela.show(); });
   // Confirmação antes de fechar (botão X, Alt+F4 ou menu Arquivo → Sair)
+  // O diálogo é o do próprio app (visual moderno, com "Salvar rascunho e sair"); a caixa nativa fica só como reserva
+  // para quando a interface não responde (carregando, travada ou com erro).
   janela.on('close', e => {
     if (saindo) return;
     e.preventDefault();
-    const r = dialog.showMessageBoxSync(janela, { type: 'question', title: NOME, message: 'Deseja realmente sair do Vorticis Emite NFS?', detail: 'Notas em digitação que não foram salvas como rascunho serão perdidas.', buttons: ['Sair', 'Cancelar'], defaultId: 1, cancelId: 1, noLink: true });
-    if (r === 0) { saindo = true; janela.close(); }
+    if (perguntando) return;
+    perguntando = true;
+    confirmarSaida().then(sair => { perguntando = false; if (sair) { saindo = true; janela.close(); } });
   });
+  janela.on('closed', () => { janela = null; app.quit(); }); // fecha também a janela do Emissor Nacional
   janela.loadURL(base);
 
   // Links externos no navegador padrão; PDFs (DANFSe) e prévias em janela própria

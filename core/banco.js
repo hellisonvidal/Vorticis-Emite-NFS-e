@@ -143,7 +143,35 @@ const MIGRACOES = [
   ['contribuintes', 'responsavel_cpf', 'TEXT'],     // responsável legal no cadastro CNPJ (representação pela base CNPJ)
   ['contribuintes', 'responsavel_nome', 'TEXT'],
   ['contribuintes', 'responsavel_fonte', 'TEXT'],
+  ['tomadores', 'contribuinte_id', 'INTEGER REFERENCES contribuintes(id) ON DELETE CASCADE'],
+  ['contribuintes', 'govbr_cpf', 'TEXT'],
+  ['contribuintes', 'govbr_nome', 'TEXT'],
+  ['contribuintes', 'govbr_papel', 'TEXT'],
 ];
+
+/** Clientes passam a pertencer a uma empresa emitente. Cadastros antigos (sem empresa) são distribuídos pelas notas
+ *  em que aparecem: um cadastro usado por duas empresas vira dois. Sem notas, vão para a empresa única do usuário;
+ *  com várias empresas e sem notas, ficam "sem empresa" até o usuário vinculá-los. */
+export function separarTomadoresPorEmpresa(db) {
+  const orfaos = db.prepare('SELECT * FROM tomadores WHERE contribuinte_id IS NULL').all();
+  if (!orfaos.length) return 0;
+  const cols = db.prepare('PRAGMA table_info(tomadores)').all().map(c => c.name).filter(c => !['id', 'contribuinte_id'].includes(c));
+  let n = 0;
+  for (const t of orfaos) {
+    const emps = db.prepare('SELECT DISTINCT contribuinte_id c FROM notas WHERE tomador_id = ? AND contribuinte_id IS NOT NULL ORDER BY contribuinte_id').all(t.id).map(r => r.c);
+    if (!emps.length) {
+      const unica = db.prepare('SELECT id FROM contribuintes WHERE usuario_id = ?').all(t.usuario_id);
+      if (unica.length === 1) { db.prepare('UPDATE tomadores SET contribuinte_id = ? WHERE id = ?').run(unica[0].id, t.id); n++; }
+      continue;
+    }
+    db.prepare('UPDATE tomadores SET contribuinte_id = ? WHERE id = ?').run(emps[0], t.id); n++;
+    for (const cid of emps.slice(1)) {
+      const novo = db.prepare(`INSERT INTO tomadores (contribuinte_id, ${cols.join(',')}) VALUES (?, ${cols.map(() => '?').join(',')})`).run(cid, ...cols.map(k => t[k] ?? null)).lastInsertRowid;
+      db.prepare('UPDATE notas SET tomador_id = ? WHERE tomador_id = ? AND contribuinte_id = ?').run(novo, t.id, cid); n++;
+    }
+  }
+  return n;
+}
 
 export function iniciarBanco(db) {
   db.exec(SCHEMA);
@@ -155,6 +183,8 @@ export function iniciarBanco(db) {
     const cols = db.prepare(`PRAGMA table_info(${tabela})`).all().map(c => c.name);
     if (!cols.includes(coluna)) db.exec(`ALTER TABLE ${tabela} ADD COLUMN ${coluna} ${def}`);
   }
+  db.exec('CREATE INDEX IF NOT EXISTS ix_tomadores_contrib ON tomadores(contribuinte_id)');
+  separarTomadoresPorEmpresa(db);
   return db;
 }
 

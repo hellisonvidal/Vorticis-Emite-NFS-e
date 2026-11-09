@@ -1,6 +1,6 @@
 import { get, post, cached, ErroApi } from '../api.js';
 import { preencherPelaReceita } from '../receita.js';
-import { abrirEmissorGovBr } from '../govbr.js';
+import { emitirPeloGovBr } from '../govbr.js';
 import { $, $$, esc, icon, moeda, pct, num, toast, modal, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, fmtCTrib, fmtNBS, fmtChave, hoje, formatarXml, AMB, badge, dataBR } from '../ui.js';
 import { estado } from '../estado.js';
 
@@ -20,7 +20,9 @@ export async function paginaEmitir(view, params) {
 
   // Emitir como: certificado da empresa, e-CNPJ da mesma raiz, responsável legal (e-CPF) ou procurador
   const acessoOpts = (c.acessos || []).map(a => [a.valor, a.rotulo]);
-  if (!acessoOpts.length) acessoOpts.push(['', c.ambiente === 'simulacao' ? 'Simulação (sem certificado)' : 'Nenhum certificado vinculado — veja Empresas → Representação']);
+  if (!acessoOpts.length && c.ambiente === 'simulacao') acessoOpts.push(['', 'Simulação (sem certificado)']);
+  // conta gov.br (titular, responsável legal ou procurador): emissão no Emissor Nacional com validação prévia no app
+  if (c.ambiente !== 'simulacao') acessoOpts.push(['g', 'Conta gov.br — titular, responsável legal ou procurador (Emissor Nacional)']);
 
   view.innerHTML = `
   <div class="page-head"><div><h1>Emitir NFS-e</h1><p>${esc(c.razao_social)} · ${fmtDoc(c.documento)} · ${esc(c.regime_label || '')} · ${badge(c.ambiente, AMB)}</p></div>
@@ -35,7 +37,7 @@ export async function paginaEmitir(view, params) {
     <div class="card">
       <div class="section-title"><span class="n">1</span><h2>Emitente e forma de acesso</h2></div>
       <div class="grid g3">
-        ${campo('Emitir como', `<select name="acesso">${acessoOpts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`, { cls: 'span2', hint: 'Empresa, responsável legal (e-CPF), estabelecimento da mesma raiz ou procurador. A emissão pela conta gov.br é feita no Emissor Nacional (botão abaixo).' })}
+        ${campo('Emitir como', `<select name="acesso">${acessoOpts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`, { cls: 'span2', hint: 'Certificado da empresa, do responsável legal (e-CPF), da mesma raiz ou de procurador; ou a conta gov.br (sem certificado), com emissão no Emissor Nacional validada pelo app.' })}
         ${campo('Competência', `<input type="date" name="competencia" max="${hoje()}" value="${hoje()}" required>`, { req: true })}
       </div>
     </div>
@@ -45,14 +47,14 @@ export async function paginaEmitir(view, params) {
         <label class="check"><input type="checkbox" id="semTomador"> Sem tomador identificado</label></div>
       <div id="tomBox">
         <div class="grid g4" style="margin-bottom:12px">
-          ${campo('Buscar cliente cadastrado', '<input id="buscaTom" placeholder="Nome, CNPJ/CPF ou e-mail…">', { cls: 'span4' })}
+          ${campo(`Buscar cliente de ${esc(c.nome_fantasia || c.razao_social)}`, '<input id="buscaTom" placeholder="Nome, CNPJ/CPF ou e-mail…">', { cls: 'span4' })}
         </div>
         <div class="grid g4">
           ${campo('Tipo', `<select name="t_tipo_doc">${opts(TP_DOC, 'CNPJ')}</select>`)}
-          ${campo('CPF/CNPJ/NIF', `<div class="input-group"><input name="t_documento" data-mask="doc" inputmode="numeric" style="min-width:170px"><button type="button" class="btn sm" id="btnCnpj" title="Consultar CNPJ">${icon('search')}</button></div>`)}
-          ${campo('Nome / Razão social', '<input name="t_nome">', { cls: 'span2', req: true })}
+          ${campo('CPF/CNPJ/NIF', `<div class="input-group"><input name="t_documento" data-mask="doc" inputmode="numeric"><button type="button" class="btn sm" id="btnCnpj" title="Consultar CNPJ na Receita">${icon('search')}</button></div>`, { cls: 'span2' })}
           ${campo('Inscrição municipal', '<input name="t_im">')}
-          ${campo('E-mail', '<input name="t_email" type="email">')}
+          ${campo('Nome / Razão social', '<input name="t_nome">', { cls: 'span4', req: true })}
+          ${campo('E-mail', '<input name="t_email" type="email">', { cls: 'span2' })}
           ${campo('Telefone', '<input name="t_fone" data-mask="fone" inputmode="tel">')}
           ${campo('CEP', `<div class="input-group"><input name="t_cep" data-mask="cep"><button type="button" class="btn sm" id="btnCep" title="Buscar CEP">${icon('search')}</button></div>`)}
           ${campo('Logradouro', '<input name="t_logradouro">', { cls: 'span2' })}
@@ -233,7 +235,10 @@ export async function paginaEmitir(view, params) {
     escolher: o => { form.ctribmun.value = o.ctribmun; if (o.aliquota != null && o.aliquota !== '' && !form.aliq_iss.value) form.aliq_iss.value = o.aliquota; recalc(); },
     rodape: () => (c.ambiente !== 'simulacao' && form.ctribnac.value ? [{ html: `Consultar códigos municipais de ${fmtCTrib(form.ctribnac.value)} na Sefin…`, acao: async () => {
       try {
-        await get(`/api/parametros-municipais?contribuinte_id=${c.id}&servico=${form.ctribnac.value}`);
+        const r = await get(`/api/parametros-municipais?contribuinte_id=${c.id}&servico=${form.ctribnac.value}&competencia=${form.competencia.value}`);
+        if (!r.ok && r.mensagem) toast(r.mensagem);
+        const a = r.aliquotas?.[0]?.aliquota;
+        if (a != null && !form.aliq_iss.value) { form.aliq_iss.value = a; recalc(); }
         await carregarOpcoesMun();
         const n = opcoesMun.filter(o => o.ctribnac === form.ctribnac.value).length;
         toast(n ? `${n} código(s) municipal(is) disponível(is).` : 'O município não informou códigos municipais para este serviço.', n ? 'ok' : undefined);
@@ -258,7 +263,7 @@ export async function paginaEmitir(view, params) {
   munAC($('#locNome'), form.local_prestacao);
   munAC($('#tMunNome'), form.t_cod_municipio);
   autocomplete($('#buscaTom'), {
-    buscar: async q => get(`/api/tomadores?q=${encodeURIComponent(q)}`),
+    buscar: async q => get(`/api/tomadores?contribuinte_id=${c.id}&q=${encodeURIComponent(q)}`),
     render: t => `<b>${fmtDoc(t.documento, t.tipo_doc)}</b>${esc(t.nome)} <span class="muted small">${esc(t.municipio || '')}</span>`,
     escolher: t => setTomador(t),
   });
@@ -332,7 +337,7 @@ export async function paginaEmitir(view, params) {
     if (tomador && !tomador.documento && tomador.tipo_doc !== 'SEM' && !tomador.nome) tomador.vazio = true;
     const f = Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('t_') && !['acesso', 'salvar_tomador'].includes(k)));
     if (d.aliq_cbs !== '') f.ibscbs_aliq = { cbs: d.aliq_cbs, ibsUF: d.aliq_ibsuf || 0, ibsMun: d.aliq_ibsmun || 0 };
-    return { contribuinte_id: c.id, tomador: tomador?.vazio ? null : tomador, salvar_tomador: d.salvar_tomador, form: f, acesso: { procuracao_id: d.acesso?.startsWith('p:') ? +d.acesso.slice(2) : null, certificado_id: d.acesso?.startsWith('c:') ? +d.acesso.slice(2) : null },
+    return { contribuinte_id: c.id, tomador: tomador?.vazio ? null : tomador, salvar_tomador: d.salvar_tomador, form: f, acesso: { procuracao_id: d.acesso?.startsWith('p:') ? +d.acesso.slice(2) : null, certificado_id: d.acesso?.startsWith('c:') ? +d.acesso.slice(2) : null, govbr: d.acesso === 'g' || undefined },
       substituir: d.subst_chave ? { chave: so(d.subst_chave), motivo: d.subst_motivo, xMotivo: d.subst_xmotivo } : undefined, rascunho_id: rascunhoId };
   }
 
@@ -392,7 +397,7 @@ export async function paginaEmitir(view, params) {
     if (f.local_prestacao) get(`/api/tabelas/municipios?q=${f.local_prestacao}`).then(r => { const m = r.itens[0]; if (m) $('#locNome').value = `${m.nome}/${m.uf}`; });
     if (dados.tomador) setTomador({ ...dados.tomador, municipio: '' });
     if (dados.tomador?.cod_municipio) get(`/api/tabelas/municipios?q=${dados.tomador.cod_municipio}`).then(r => { const m = r.itens[0]; if (m) $('#tMunNome').value = `${m.nome}/${m.uf}`; });
-    const ac = dados.acesso?.procuracao_id ? `p:${dados.acesso.procuracao_id}` : dados.acesso?.certificado_id ? `c:${dados.acesso.certificado_id}` : '';
+    const ac = dados.acesso?.govbr ? 'g' : dados.acesso?.procuracao_id ? `p:${dados.acesso.procuracao_id}` : dados.acesso?.certificado_id ? `c:${dados.acesso.certificado_id}` : '';
     if (ac && [...form.acesso.options].some(o => o.value === ac)) form.acesso.value = ac;
     $('#semTomador').checked = !dados.tomador;
     atualizarVisibilidade(); aplicarRedSeVazio(f); recalc();
@@ -441,16 +446,31 @@ export async function paginaEmitir(view, params) {
       modal({ titulo: `Prévia da DPS ${r.id}`, wide: true, corpo: `${r.erros.length ? `<div class="alert warn" style="margin-bottom:12px">${icon('alert')}<ul>${r.erros.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : `<div class="alert ok" style="margin-bottom:12px">${icon('check')}<div>Validações locais OK. A assinatura digital é aplicada no envio.</div></div>`}<pre class="xml">${esc(formatarXml(r.xml))}</pre>`, botoes: [{ texto: 'Fechar' }] });
     } catch (e) { toast(e.message, 'error'); }
   };
-  $('#btnGovBr').onclick = async () => {
+  async function fluxoGovBr() {
     const p = payload();
-    let k = null;
-    try { if (p.form.valor_servico) k = (await post('/api/notas/calcular', { contribuinte_id: c.id, form: p.form })).calc; } catch { /* sem cálculo */ }
-    abrirEmissorGovBr(c, p, k);
+    if (!form.ctribnac.value) return toast('Selecione o código de tributação nacional.', 'error');
+    if (c.ambiente === 'simulacao') return toast('A empresa está em modo simulação. Para emitir pelo gov.br, altere o ambiente da empresa (Empresas → editar).', 'error');
+    const r = await emitirPeloGovBr(c, p, { rascunhoId });
+    if (r) rascunhoId = r.rascunho_id;
+  }
+  $('#btnGovBr').onclick = fluxoGovBr;
+  const rotuloEmitir = () => {
+    const g = form.acesso.value === 'g';
+    $('#btnEmitir').innerHTML = g ? `${icon('shield')}Emitir pelo gov.br` : `${icon('send')}${c.ambiente === 'simulacao' ? 'Emitir (simulação)' : 'Emitir NFS-e'}`;
+    $('#btnGovBr').classList.toggle('hidden', g);
   };
+  form.acesso.addEventListener('change', rotuloEmitir);
+  rotuloEmitir();
   $('#btnRasc').onclick = async () => {
     try { const r = await post('/api/notas/rascunho', { ...payload(), id: rascunhoId }); rascunhoId = r.id; toast('Rascunho salvo.', 'ok'); } catch (e) { toast(e.message, 'error'); }
   };
+  // usado pela confirmação de saída ("Salvar rascunho e sair")
+  globalThis.__vorticisSalvarRascunho = async () => {
+    if (!document.contains(form)) return;
+    try { const r = await post('/api/notas/rascunho', { ...payload(), id: rascunhoId }); rascunhoId = r.id; } catch (e) { toast(e.message, 'error'); throw e; }
+  };
   $('#btnEmitir').onclick = async () => {
+    if (form.acesso.value === 'g') return fluxoGovBr();
     const p = payload();
     if (!form.ctribnac.value) return toast('Selecione o código de tributação nacional.', 'error');
     if (c.ambiente === 'producao') {

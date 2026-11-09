@@ -254,21 +254,48 @@ export function criarApi(P) {
   });
   DEL('/api/codigos-municipais/:id', ({ params }) => { db.prepare('DELETE FROM codigos_municipais WHERE id = ?').run(params.id); return { ok: true }; });
 
-  GET('/api/parametros-municipais', async ({ user, query: { contribuinte_id, municipio, servico, tipo, procuracao_id } }) => {
+  // Rotas da API de parâmetros municipais (Sefin Nacional / ADN): /{cMun}/convenio, /{cMun}/{cServ}/{competencia}/aliquota,
+  // /{cMun}/{cServ}/historicoaliquotas, /{cMun}/{cServ}/{competencia}/regimes_especiais, /{cMun}/{competencia}/retencoes.
+  // O código do serviço é o cTribNac (6 dígitos) seguido do cTribMun (3 dígitos, "000" quando o município não detalha).
+  GET('/api/parametros-municipais', async ({ user, query: { contribuinte_id, municipio, servico, ctribmun, competencia, tipo, procuracao_id } }) => {
     const c = contribuinte(user.id, contribuinte_id);
-    const cred = await credencial(user.id, c, procuracao_id);
-    if (!cred.cert) falha('Consulta de parâmetros municipais exige certificado digital (próprio ou de procurador).');
+    const cMun = so(municipio || c.cod_municipio);
+    if (!/^\d{7}$/.test(cMun)) falha('Informe o município (código IBGE de 7 dígitos).');
+    const comp = /^\d{4}-\d{2}(-\d{2})?$/.test(competencia || '') ? `${competencia.slice(0, 7)}-01` : `${new Date().toISOString().slice(0, 7)}-01`;
+    const trib = so(servico), mun = so(ctribmun);
+    const modo = ['convenio', 'retencoes', 'regimes', 'historico'].includes(tipo) ? tipo : 'servico';
+    if (['servico', 'regimes', 'historico'].includes(modo) && !/^\d{6}$/.test(trib)) falha('Informe o código de tributação nacional (cTribNac, 6 dígitos) para consultar alíquotas e regimes do serviço.');
+    if (mun && !/^\d{3}$/.test(mun)) falha('O código de tributação municipal tem 3 dígitos.');
+    const servs = [...new Set([`${trib}${mun || '000'}`, trib])];
+    const sufixos = modo === 'convenio' ? ['convenio']
+      : modo === 'retencoes' ? [`${comp}/retencoes`]
+      : modo === 'regimes' ? servs.map(s => `${s}/${comp}/regimes_especiais`)
+      : modo === 'historico' ? servs.map(s => `${s}/historicoaliquotas`)
+      : [...servs.map(s => `${s}/${comp}/aliquota`), ...servs.map(s => `${s}/historicoaliquotas`)];
+    const cred = await credencial(user.id, c, procuracao_id, 'consulta');
+    if (!cred.cert) falha('Consulta de parâmetros municipais exige certificado digital (próprio, de responsável legal ou de procurador).');
     const amb = c.ambiente === 'producao' ? 'producao' : 'homologacao';
-    const suf = tipo === 'convenio' ? 'convenio' : tipo === 'contribuinte' ? so(c.documento) : so(servico);
-    const r = await sefin.parametrosMunicipais(amb, cred.cert, municipio || c.cod_municipio, suf);
+    const r = await sefin.parametrosMunicipais(amb, cred.cert, cMun, sufixos);
+    r.municipio = { codigo: cMun, nome: nomeMunicipio(cMun) };
+    r.competencia = comp;
+    if (!r.ok) r.mensagem = r.status === 404
+      ? `A Sefin não retornou parâmetros de ${nomeMunicipio(cMun) || cMun} para ${modo === 'convenio' ? 'o convênio' : `o serviço ${trib}${mun ? `/${mun}` : ''} na competência ${comp.slice(5, 7)}/${comp.slice(0, 4)}`}. O município pode não ter aderido ao emissor nacional ou não ter parametrizado este serviço no ambiente ${amb === 'producao' ? 'de produção' : 'de produção restrita (homologação)'}.`
+      : r.status === 401 || r.status === 403 ? 'A Sefin recusou o certificado para esta consulta (HTTP ' + r.status + ').' : `A Sefin respondeu HTTP ${r.status}.`;
     try {
-      const lista = r.dados?.aliquotas || r.dados?.servicos || [];
-      for (const it of Array.isArray(lista) ? lista : []) {
-        if (it.codigoTributacaoMunicipal || it.cTribMun) {
-          db.prepare(`INSERT OR REPLACE INTO codigos_municipais (cod_municipio, ctribnac, ctribmun, descricao, aliquota, origem) VALUES (?,?,?,?,?,'sefin')`)
-            .run(municipio || c.cod_municipio, so(servico), so(it.codigoTributacaoMunicipal || it.cTribMun), it.descricao || '', it.aliquota ?? null);
-        }
-      }
+      // Alíquotas encontradas em qualquer nível da resposta (o formato varia entre as rotas)
+      const achadas = [];
+      const andar = (v, rot) => {
+        if (achadas.length > 50 || v === null || typeof v !== 'object') return;
+        if (Array.isArray(v)) return v.forEach(x => andar(x, rot));
+        const aliq = Object.keys(v).find(k => /^(aliq|aliquota|paliq)$/i.test(k));
+        if (aliq && v[aliq] !== null && v[aliq] !== '' && !Number.isNaN(+v[aliq])) achadas.push({ servico: rot, aliquota: +v[aliq], inicio: v.DtIni || v.dataInicio || v.dtIni || null, fim: v.DtFim || v.dataFim || v.dtFim || null });
+        for (const [k, x] of Object.entries(v)) andar(x, /^\d{6,9}$/.test(k) ? k : rot);
+        const cm = v.codigoTributacaoMunicipal || v.cTribMun;
+        if (cm && /^\d{3}$/.test(so(cm))) db.prepare(`INSERT OR REPLACE INTO codigos_municipais (cod_municipio, ctribnac, ctribmun, descricao, aliquota, origem) VALUES (?,?,?,?,?,'sefin')`)
+          .run(cMun, trib, so(cm), v.descricao || '', v.aliquota ?? v.Aliq ?? null);
+      };
+      if (r.ok) andar(r.dados, trib);
+      r.aliquotas = achadas;
     } catch { /* formato inesperado */ }
     return r;
   });
@@ -485,26 +512,54 @@ export function criarApi(P) {
 
   // ------------------------------------------------------------ tomadores
   const CAMPOS_TOMA = ['tipo_doc', 'documento', 'nome', 'im', 'cep', 'logradouro', 'numero', 'complemento', 'bairro', 'cod_municipio', 'uf', 'pais', 'cidade_ext', 'estado_ext', 'cod_postal_ext', 'fone', 'email', 'orgao_publico', 'tp_ente_gov', 'retem_iss', 'retem_federais'];
-  function salvarTomador(uid, t) {
+  /** Salva o cliente na empresa `t.contribuinte_id`. Cada empresa tem seus próprios clientes: o mesmo CNPJ em duas
+   *  empresas são dois cadastros. `mover` permite trocar a empresa de um cadastro existente (tela de clientes). */
+  function salvarTomador(uid, t, { mover = false } = {}) {
+    const cid = +t.contribuinte_id || null;
+    if (!cid) falha('Selecione a empresa emitente do cliente.');
+    contribuinte(uid, cid);
     const o = {};
     for (const k of CAMPOS_TOMA) if (t[k] !== undefined) o[k] = typeof t[k] === 'boolean' ? +t[k] : t[k];
     if (['CNPJ', 'CPF'].includes(o.tipo_doc)) o.documento = so(o.documento);
     for (const k of ['cep', 'cod_municipio', 'im']) if (o[k]) o[k] = so(o[k]);
     if (!o.nome) falha('Nome do tomador é obrigatório.');
     if (o.documento && !docValido(o.tipo_doc, o.documento)) falha('CPF/CNPJ do tomador inválido.');
-    const existente = t.id ? db.prepare('SELECT id FROM tomadores WHERE id = ? AND usuario_id = ?').get(t.id, uid)
-      : (o.documento ? db.prepare('SELECT id FROM tomadores WHERE usuario_id = ? AND documento = ?').get(uid, o.documento) : null);
+    let existente = t.id ? db.prepare('SELECT id, contribuinte_id FROM tomadores WHERE id = ? AND usuario_id = ?').get(t.id, uid) : null;
+    // cadastro de outra empresa: na emissão, não altera o cliente da outra empresa (usa/cria o desta)
+    if (existente && existente.contribuinte_id && existente.contribuinte_id !== cid && !mover) existente = null;
+    if (!existente && o.documento) existente = db.prepare('SELECT id FROM tomadores WHERE usuario_id = ? AND contribuinte_id = ? AND documento = ?').get(uid, cid, o.documento);
+    if (!existente && t.id && !mover) {
+      // cadastro antigo sem empresa: passa a ser desta empresa
+      existente = db.prepare('SELECT id FROM tomadores WHERE id = ? AND usuario_id = ? AND contribuinte_id IS NULL').get(t.id, uid);
+    }
+    o.contribuinte_id = cid;
     const ks = Object.keys(o);
     if (existente) { db.prepare(`UPDATE tomadores SET ${ks.map(k => `${k} = ?`).join(',')} WHERE id = ?`).run(...ks.map(k => o[k]), existente.id); return existente.id; }
     return db.prepare(`INSERT INTO tomadores (usuario_id, ${ks.join(',')}) VALUES (?, ${ks.map(() => '?').join(',')})`).run(uid, ...ks.map(k => o[k])).lastInsertRowid;
   }
+  // ?contribuinte_id=N → clientes da empresa; ?contribuinte_id=sem → cadastros antigos sem empresa; sem parâmetro → todos
   GET('/api/tomadores', ({ user, query }) => {
-    const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM notas n WHERE n.tomador_id = t.id AND n.status='autorizada') qtd_notas,
-      (SELECT SUM(valor_servico) FROM notas n WHERE n.tomador_id = t.id AND n.status='autorizada') total FROM tomadores t WHERE usuario_id = ? ORDER BY nome`).all(user.id);
+    const cid = query.contribuinte_id;
+    const filtro = cid === 'sem' ? ' AND t.contribuinte_id IS NULL' : cid ? ' AND t.contribuinte_id = ?' : '';
+    const rows = db.prepare(`SELECT t.*, c.razao_social empresa, c.nome_fantasia empresa_fantasia, (SELECT COUNT(*) FROM notas n WHERE n.tomador_id = t.id AND n.status='autorizada') qtd_notas,
+      (SELECT SUM(valor_servico) FROM notas n WHERE n.tomador_id = t.id AND n.status='autorizada') total FROM tomadores t LEFT JOIN contribuintes c ON c.id = t.contribuinte_id
+      WHERE t.usuario_id = ?${filtro} ORDER BY t.nome`).all(user.id, ...(cid && cid !== 'sem' ? [+cid] : []));
     return (query.q ? buscar(rows, query.q, ['nome', 'documento', 'email'], 200).itens : rows).map(t => ({ ...t, municipio: nomeMunicipio(t.cod_municipio) }));
   });
   POST('/api/tomadores', ({ user, body }) => ({ id: salvarTomador(user.id, body) }));
-  PUT('/api/tomadores/:id', ({ user, params, body }) => ({ id: salvarTomador(user.id, { ...body, id: params.id }) }));
+  PUT('/api/tomadores/:id', ({ user, params, body }) => ({ id: salvarTomador(user.id, { ...body, id: params.id }, { mover: true }) }));
+  /** Copia clientes para outra empresa (ex.: cliente atendido pelas duas). */
+  POST('/api/tomadores/copiar', ({ user, body }) => {
+    const destino = contribuinte(user.id, body.contribuinte_id);
+    let n = 0;
+    for (const id of (body.ids || []).slice(0, 1000)) {
+      const t = db.prepare('SELECT * FROM tomadores WHERE id = ? AND usuario_id = ?').get(id, user.id);
+      if (!t) continue;
+      const { id: _i, usuario_id: _u, criado_em: _c, ...dados } = t;
+      salvarTomador(user.id, { ...dados, contribuinte_id: destino.id }); n++;
+    }
+    return { copiados: n };
+  });
   DEL('/api/tomadores/:id', ({ user, params }) => { db.prepare('DELETE FROM tomadores WHERE id = ? AND usuario_id = ?').run(params.id, user.id); return { ok: true }; });
 
   async function obterJson(url) {
@@ -640,7 +695,8 @@ export function criarApi(P) {
     if (b.tomador_id && !b.tomador) return db.prepare('SELECT * FROM tomadores WHERE id = ? AND usuario_id = ?').get(b.tomador_id, uid);
     const t = b.tomador;
     if (!t || (!t.documento && t.tipo_doc !== 'SEM' && !t.nome)) return null;
-    if (b.salvar_tomador !== false && t.nome) t.id = salvarTomador(uid, t);
+    if (b.salvar_tomador !== false && t.nome) t.id = salvarTomador(uid, { ...t, contribuinte_id: b.contribuinte_id });
+    else if (t.id && !db.prepare('SELECT 1 FROM tomadores WHERE id = ? AND usuario_id = ? AND (contribuinte_id = ? OR contribuinte_id IS NULL)').get(t.id, uid, +b.contribuinte_id)) delete t.id;
     return { ...t, documento: ['CNPJ', 'CPF'].includes(t.tipo_doc) ? so(t.documento) : t.documento };
   }
   POST('/api/notas/calcular', ({ user, body }) => {
@@ -668,6 +724,93 @@ export function criarApi(P) {
     }
     return { id: db.prepare('INSERT INTO notas (usuario_id, contribuinte_id, tomador_id, status, dados, tomador_nome, tomador_doc, valor_servico, descricao, ctribnac, competencia) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
       .run(user.id, c.id, t?.id || null, 'rascunho', dados, t?.nome || '', t?.documento || '', k.vServ, f.descricao || '', so(f.ctribnac), f.competencia || null).lastInsertRowid };
+  });
+
+  // ---- Emissão pela conta gov.br (Emissor Nacional web). As APIs da Sefin exigem certificado ICP-Brasil; com a conta
+  // gov.br a nota é emitida no Emissor Nacional. O app valida antes quem vai emitir (titular, responsável legal ou
+  // procurador) e a própria nota (mesmas regras da emissão por API), guarda um rascunho vinculado e, quando o XML da
+  // NFS-e volta (download capturado no Windows ou "Importar XML"), o rascunho vira a nota autorizada.
+  const PAPEIS_GOVBR = { titular: 'Titular (o próprio prestador pessoa física)', responsavel: 'Responsável legal da empresa (vínculo pela base CNPJ)', procurador: 'Procurador (procuração eletrônica no e-CAC com o serviço NFS-e)' };
+  const URL_EMISSOR = { producao: 'https://www.nfse.gov.br/EmissorNacional', homologacao: 'https://www.producaorestrita.nfse.gov.br/EmissorNacional' };
+  async function validarRepresentanteGovBr(uid, c, rep) {
+    const erros = [], avisos = [], ok = [];
+    const cpf = so(rep.cpf), nome = String(rep.nome || '').trim(), papel = rep.papel;
+    if (!PAPEIS_GOVBR[papel]) erros.push({ campo: 'papel', msg: 'Informe como você vai atuar: titular, responsável legal ou procurador.' });
+    if (!docValido('CPF', cpf)) erros.push({ campo: 'cpf', msg: 'CPF do usuário gov.br inválido.' });
+    if (nome.length < 3) erros.push({ campo: 'nome', msg: 'Informe o nome completo do usuário gov.br.' });
+    if (!rep.nivel_ok) erros.push({ campo: 'nivel_ok', msg: 'A emissão no Emissor Nacional exige conta gov.br nível prata ou ouro: confirme o nível da conta.' });
+    if (erros.length) return { erros, avisos, ok };
+    const norm = x => String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+    if (papel === 'titular') {
+      if (c.tipo_doc !== 'CPF') erros.push({ campo: 'papel', msg: `${c.razao_social} é pessoa jurídica: com a conta gov.br, emita como responsável legal (sócio/administrador) ou procurador.` });
+      else if (cpf !== c.documento) erros.push({ campo: 'cpf', msg: 'O CPF do usuário gov.br é diferente do CPF do prestador. Para emitir por outra pessoa, use "Procurador".' });
+      else ok.push('CPF do usuário gov.br é o do próprio prestador.');
+    } else if (papel === 'responsavel') {
+      if (c.tipo_doc !== 'CNPJ') erros.push({ campo: 'papel', msg: 'Responsável legal se aplica a empresas (CNPJ). Para prestador pessoa física use "Titular" ou "Procurador".' });
+      else if (c.responsavel_cpf) {
+        if (c.responsavel_cpf !== cpf) erros.push({ campo: 'cpf', msg: `O responsável legal cadastrado para ${c.razao_social} é outro CPF (${fmtDocTxt(c.responsavel_cpf).replace(/^\d{3}/, '***')}). Confira em Empresas → Representação ou use "Procurador".` });
+        else ok.push(`CPF confere com o responsável legal cadastrado (${c.responsavel_fonte || 'informado'}).`);
+      } else {
+        const d = await obterJson(`https://brasilapi.com.br/api/cnpj/v1/${c.documento}`) || await obterJson(`https://minhareceita.org/${c.documento}`);
+        const qsa = (d?.qsa || []).filter(q => /\*\*\*\d{6}\*\*/.test(q.cnpj_cpf_do_socio || ''));
+        if (!d) avisos.push('Não foi possível consultar o quadro societário (QSA) na Receita agora: o vínculo do CPF com a empresa será conferido pelo Emissor Nacional.');
+        else if (!qsa.length) avisos.push('A Receita não divulga sócios/administradores pessoa física desta empresa: o vínculo será conferido pelo Emissor Nacional.');
+        else {
+          const meio = cpf.slice(3, 9);
+          const achou = qsa.find(q => q.cnpj_cpf_do_socio.replace(/\D/g, '') === meio && (!nome || norm(q.nome_socio) === norm(nome)))
+            || qsa.find(q => q.cnpj_cpf_do_socio.replace(/\D/g, '') === meio);
+          if (!achou) erros.push({ campo: 'cpf', msg: `O CPF informado não consta do quadro de sócios/administradores (QSA) de ${c.razao_social} na Receita. O Emissor Nacional só permite atuar como responsável legal a quem é o responsável pelo CNPJ; para outras pessoas é preciso procuração eletrônica.` });
+          else {
+            if (norm(achou.nome_socio) !== norm(nome)) avisos.push(`No QSA o titular desse CPF é "${achou.nome_socio}": confira o nome.`);
+            const resp = d.qualificacao_do_responsavel != null && +achou.codigo_qualificacao_socio === +d.qualificacao_do_responsavel;
+            (resp ? ok : avisos).push(resp ? `CPF consta do QSA como ${achou.qualificacao_socio} (qualificação do responsável pelo CNPJ).`
+              : `CPF consta do QSA como ${achou.qualificacao_socio}, mas o responsável perante a Receita tem outra qualificação. Se o Emissor Nacional não liberar a empresa, use procuração eletrônica.`);
+          }
+        }
+      }
+    } else if (papel === 'procurador') {
+      if (cpf === c.documento) erros.push({ campo: 'cpf', msg: 'O procurador não pode ser o próprio prestador: use "Titular".' });
+      const hoje = new Date().toISOString().slice(0, 10);
+      const procs = db.prepare('SELECT * FROM procuracoes WHERE contribuinte_id = ? AND usuario_id = ? AND procurador_doc = ?').all(c.id, uid, cpf);
+      const valida = procs.find(x => x.ativo && (!x.valida_ate || x.valida_ate >= hoje) && (!x.valida_de || x.valida_de <= hoje) && String(x.escopo || 'emissao').includes('emissao'));
+      if (valida) ok.push(`Procuração cadastrada para este CPF${valida.valida_ate ? `, válida até ${valida.valida_ate.split('-').reverse().join('/')}` : ''}.`);
+      else if (procs.some(x => x.valida_ate && x.valida_ate < hoje)) erros.push({ campo: 'cpf', msg: 'A procuração cadastrada para este CPF está vencida. Renove-a no e-CAC (Portal de Serviços da Receita) e atualize o cadastro.' });
+      else if (procs.length) erros.push({ campo: 'cpf', msg: 'A procuração cadastrada para este CPF está inativa, fora da vigência ou não inclui emissão.' });
+      else if (!rep.confirma_procuracao) erros.push({ campo: 'confirma_procuracao', msg: 'Não há procuração deste CPF cadastrada no app. Confirme que existe procuração eletrônica vigente no Portal de Serviços da Receita (e-CAC) com o serviço "NFS-e" para este prestador.' });
+      else avisos.push('Procuração declarada pelo usuário (não cadastrada no app): o Emissor Nacional confere a procuração no login.');
+    }
+    return { erros, avisos, ok };
+  }
+  POST('/api/notas/govbr/validar-representante', async ({ user, body }) => {
+    const c = contribuinte(user.id, body.contribuinte_id);
+    return validarRepresentanteGovBr(user.id, c, body.representante || {});
+  });
+  POST('/api/notas/govbr/preparar', async ({ user, body }) => {
+    const uid = user.id;
+    const c = contribuinte(uid, body.contribuinte_id);
+    if (!c.ativo) falha('Empresa inativa.');
+    if (c.ambiente === 'simulacao') falha('A empresa está em modo simulação. Para emitir pelo gov.br, altere o ambiente da empresa para produção (ou homologação, que usa o Emissor Nacional de produção restrita).');
+    const rep = body.representante || {};
+    const v = await validarRepresentanteGovBr(uid, c, rep);
+    if (v.erros.length) falha(v.erros[0].msg, 422, { erros: v.erros, avisos: v.avisos });
+    const f = body.form || {};
+    const t = tomadorDoForm(uid, body);
+    const calc = calcular(f, c);
+    const errosNota = validarEmissao({ contrib: c, tomador: t, form: f, calc });
+    if (errosNota.length) falha('Corrija os campos antes de emitir.', 422, { erros: errosNota });
+    db.prepare('UPDATE contribuintes SET govbr_cpf = ?, govbr_nome = ?, govbr_papel = ? WHERE id = ?').run(so(rep.cpf), String(rep.nome).trim().slice(0, 150), rep.papel, c.id);
+    const govbr = { cpf: so(rep.cpf), nome: String(rep.nome).trim(), papel: rep.papel, preparado_em: new Date().toISOString(), validacao: v.ok.concat(v.avisos) };
+    const dados = JSON.stringify({ form: f, tomador: t, acesso: { govbr: true }, govbr });
+    const ant = body.rascunho_id ? db.prepare("SELECT id FROM notas WHERE id = ? AND usuario_id = ? AND status IN ('rascunho','rejeitada')").get(body.rascunho_id, uid) : null;
+    let id;
+    if (ant) {
+      db.prepare(`UPDATE notas SET dados = ?, status = 'rascunho', tomador_id = ?, tomador_nome = ?, tomador_doc = ?, valor_servico = ?, descricao = ?, ctribnac = ?, competencia = ?, atualizado_em = datetime('now') WHERE id = ?`)
+        .run(dados, t?.id || null, t?.nome || '', t?.documento || '', calc.vServ, f.descricao || '', so(f.ctribnac), f.competencia || null, ant.id);
+      id = ant.id;
+    } else id = db.prepare('INSERT INTO notas (usuario_id, contribuinte_id, tomador_id, status, dados, tomador_nome, tomador_doc, valor_servico, descricao, ctribnac, competencia) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(uid, c.id, t?.id || null, 'rascunho', dados, t?.nome || '', t?.documento || '', calc.vServ, f.descricao || '', so(f.ctribnac), f.competencia || null).lastInsertRowid;
+    audit(uid, 'nota.govbr.preparar', `${c.documento} por ${PAPEIS_GOVBR[rep.papel].split(' (')[0]} ${so(rep.cpf).slice(0, 3)}***`);
+    return { rascunho_id: id, calc, ok: v.ok, avisos: v.avisos, url: URL_EMISSOR[c.ambiente] || URL_EMISSOR.producao, representante: { cpf: govbr.cpf, nome: govbr.nome, papel: govbr.papel, papel_label: PAPEIS_GOVBR[govbr.papel] } };
   });
 
   POST('/api/notas/emitir', async ({ user, body }) => {
@@ -1029,11 +1172,21 @@ export function criarApi(P) {
 
   // Importa do ADN (distribuição por NSU) as NFS-e do CNPJ, inclusive as emitidas fora do app (ex.: Emissor Web)
   /** Grava (ou completa) uma NFS-e autorizada vinda de fora do app: ADN, Emissor Nacional (gov.br) ou arquivo. */
+  /** Rascunho preparado para o gov.br que corresponde à NFS-e (mesma empresa, valor e tomador). */
+  function rascunhoGovBr(uid, c, x) {
+    return db.prepare(`SELECT id, tomador_id, dados FROM notas WHERE usuario_id = ? AND contribuinte_id = ? AND status = 'rascunho' AND dados LIKE '%"govbr":{%'
+      AND ABS(COALESCE(valor_servico, 0) - ?) < 0.005 AND COALESCE(tomador_doc, '') = ? ORDER BY atualizado_em DESC, id DESC LIMIT 1`).get(uid, c.id, +x.vServ || 0, so(x.tomaDoc || ''));
+  }
   function registrarNFSe(uid, c, xml, x, { origem, via, ambiente, msg }) {
     const ex = db.prepare('SELECT id, status FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(uid, x.chave);
     if (ex) {
       db.prepare("UPDATE notas SET xml_nfse = COALESCE(xml_nfse, ?), nnfse = COALESCE(nnfse, ?), atualizado_em = datetime('now') WHERE id = ?").run(xml, x.nNFSe, ex.id);
       return 'atualizada';
+    }
+    const rasc = rascunhoGovBr(uid, c, x);
+    if (rasc) {
+      const g = json(rasc.dados).govbr || {};
+      msg += ` Rascunho nº ${rasc.id} preparado no app; emitida por ${g.nome || ''} (${{ titular: 'titular', responsavel: 'responsável legal', procurador: 'procurador' }[g.papel] || g.papel}).`;
     }
     const retido = x.tpRetISSQN && x.tpRetISSQN !== '1';
     db.prepare(`INSERT INTO notas (usuario_id, contribuinte_id, status, ambiente, serie, ndps, id_dps, chave_acesso, nnfse, dh_emi, competencia, dh_proc, tomador_doc, tomador_nome,
@@ -1046,6 +1199,14 @@ export function criarApi(P) {
       JSON.stringify({ form: { competencia: x.dCompet, ctribnac: x.cTribNac, cnbs: x.cNBS, descricao: x.xDescServ, valor_servico: x.vServ, trib_issqn: '1', tp_ret_issqn: x.tpRetISSQN || '1', aliq_iss: x.pAliq },
         tomador: x.tomaDoc ? { tipo_doc: x.tomaTipo, documento: x.tomaDoc, nome: x.tomaNome } : null }),
       xml, JSON.stringify([{ codigo: origem.toUpperCase(), descricao: msg }]));
+    if (rasc) {
+      const nova = db.prepare('SELECT id, dados FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(uid, x.chave);
+      const dr = json(rasc.dados);
+      // mantém os dados digitados no app (tomador completo, IBS/CBS, retenções) para a cópia da última nota
+      db.prepare('UPDATE notas SET tomador_id = ?, dados = ? WHERE id = ?').run(rasc.tomador_id, JSON.stringify({ ...json(nova.dados), form: { ...json(nova.dados).form, ...dr.form }, tomador: dr.tomador || json(nova.dados).tomador, govbr: dr.govbr }), nova.id);
+      db.prepare('DELETE FROM notas WHERE id = ?').run(rasc.id);
+      return 'vinculada';
+    }
     return 'importada';
   }
 
@@ -1077,7 +1238,8 @@ export function criarApi(P) {
         if (x.chSubstda) db.prepare("UPDATE notas SET status = 'substituida' WHERE usuario_id = ? AND chave_acesso = ?").run(user.id, x.chSubstda);
         aprenderIM(user.id, xml);
         res[r === 'atualizada' ? 'atualizadas' : 'importadas']++;
-        res.notas.push({ id: db.prepare('SELECT id FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(user.id, x.chave).id, nnfse: x.nNFSe, empresa: c.razao_social, chave: x.chave });
+        if (r === 'vinculada') res.vinculadas = (res.vinculadas || 0) + 1;
+        res.notas.push({ vinculada: r === 'vinculada', id: db.prepare('SELECT id FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(user.id, x.chave).id, nnfse: x.nNFSe, empresa: c.razao_social, chave: x.chave });
       } catch (e) { res.erros.push({ arquivo: i + 1, erro: e.message }); }
     });
     audit(user.id, 'notas.importar-xml', `${via}: ${res.importadas} novas, ${res.atualizadas} atualizadas, ${res.eventos} eventos`);

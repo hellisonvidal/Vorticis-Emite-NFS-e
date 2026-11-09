@@ -12,6 +12,7 @@ import { paginaCertificados } from './pages/certificados.js';
 import { paginaTabelas } from './pages/tabelas.js';
 import { paginaRelatorios } from './pages/relatorios.js';
 import { paginaConfig } from './pages/config.js';
+import './saida.js'; // confirmação de saída do app (Windows)
 import './govbr.js'; // registra a importação automática do XML baixado no Emissor Nacional (Windows)
 
 const ROTAS = {

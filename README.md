@@ -24,11 +24,12 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
   - um **procurador** com procuração eletrônica do serviço NFS-e.
 
   A Sefin confere o vínculo pelo certificado da conexão e pela assinatura. Cancelamento e consulta usam o mesmo certificado que emitiu a nota.
-- **Conta gov.br:** a conta gov.br (prata/ouro) é aceita apenas no **Emissor Nacional web**; as APIs exigem certificado. O botão "Emitir pelo gov.br" abre o Emissor Nacional e um assistente com os dados da nota para copiar:
-  - **no Windows**, o Emissor abre numa janela do app com o login salvo, e o **XML baixado é importado automaticamente**;
-  - **no navegador e no Android**, o Emissor abre no navegador e você usa "Importar XML" em Notas emitidas.
-
-  No Emissor, use "Procuração/Representação" para atuar como responsável legal ou procurador.
+- **Conta gov.br (sem certificado):** a conta gov.br (prata/ouro) é aceita apenas no **Emissor Nacional web**; as APIs da Sefin exigem certificado. Por isso, em "Emitir como → Conta gov.br" o app faz por dentro tudo o que é possível:
+  - **valida quem vai emitir**: titular (CPF igual ao do prestador pessoa física), **responsável legal** (CPF conferido com o responsável cadastrado ou com o quadro societário da Receita) ou **procurador** (procuração cadastrada no app, vigente e com emissão; sem cadastro, exige confirmar a procuração do e-CAC com o serviço NFS-e). Também exige confirmar o nível prata/ouro da conta;
+  - **valida a nota** com as mesmas regras da emissão por API e guarda um **rascunho vinculado**;
+  - abre o Emissor Nacional do ambiente da empresa (produção ou produção restrita). **No Windows**, numa janela do app com o login salvo e um **painel Vorticis dentro da página**: clique no campo do Emissor e em "Inserir";
+  - o **XML baixado volta para o app** (Windows: automaticamente; navegador/Android: "Importar XML") e **substitui o rascunho** pela nota autorizada.
+- **Clientes por empresa:** cada empresa emitente tem o seu cadastro de clientes; a emissão só sugere os clientes da empresa selecionada. Um cliente pode ser copiado para outra empresa. Na atualização, os cadastros antigos são distribuídos pelas notas em que aparecem.
 - **Regimes:** MEI, Simples Nacional ME/EPP (incluindo sublimite excedido), Lucro Presumido, Real e Arbitrado, Imune e Isenta, além de regimes especiais de ISS.
 - **Tributos:**
   - ISS próprio ou retido;
@@ -49,6 +50,8 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
 - **Códigos de tributação:** cTribNac e cTribMun aceitam digitação com busca e têm uma seta para ver todas as opções. As opções de cTribMun vêm da tabela do município (inclusive consultada na Sefin), dos serviços favoritos e das notas anteriores.
 - **Cadastro pela Receita:** a consulta de CNPJ preenche o endereço completo, o município/UF, o telefone e o e-mail, usando BrasilAPI, Minha Receita e CNPJ.ws como alternativas. "Completar pela Receita" faz o mesmo em lote para empresas e clientes, só nos campos vazios.
 - **Inscrição municipal:** não consta do cadastro da Receita, e o cadastro nacional (CNC) só é aberto às prefeituras. O app busca a IM nas NFS-e já emitidas ou importadas do ADN, em que a Sefin grava a IM do CNC, e preenche o cadastro automaticamente a cada nota autorizada ou importada.
+- **Parâmetros municipais (Sefin):** alíquota do serviço na competência, histórico de alíquotas, regimes especiais e convênio do município, pelas rotas oficiais (`/{município}/{serviço}/{competência}/aliquota` etc.). Quando o município não parametrizou o serviço, o app explica o motivo em vez de mostrar o erro bruto.
+- **Saída do app (Windows):** confirmação no visual do app, com "Salvar rascunho e sair" quando há nota em digitação.
 - **Consultas:** tabelas oficiais da Lista Nacional (cTribNac), NBS 2.0, correlação Item × NBS × IBS/CBS, cClassTrib, cIndOp, municípios IBGE e códigos municipais.
 - **Notas:**
   - XML da DPS e da NFS-e;

@@ -67,20 +67,39 @@ export async function paginaTabelas(view, params) {
     if (!$('#extra').innerHTML) {
       $('#extra').innerHTML = `<div class="grid g4" style="margin-bottom:14px;align-items:end">
         <label class="f"><span>Município</span><input id="mNome" value="${esc(c?.municipio || '')}"><input type="hidden" id="mCod" value="${c?.cod_municipio || ''}"></label>
-        <label class="f"><span>cTribNac</span><input id="mTrib" placeholder="010101"></label>
-        <div class="btns span2"><button class="btn" id="bSefin">${icon('refresh')}Consultar parâmetros na Sefin</button><button class="btn" id="bConv">Convênio do município</button><button class="btn primary" id="bAdd">${icon('plus')}Cadastrar código</button></div></div>
+        <label class="f"><span>cTribNac (6 dígitos)</span><input id="mTrib" placeholder="01.01.01" inputmode="numeric" maxlength="8"></label>
+        <label class="f"><span>cTribMun (opcional)</span><input id="mMun" placeholder="000" inputmode="numeric" maxlength="3"></label>
+        <label class="f"><span>Competência</span><input id="mComp" type="month" value="${new Date().toISOString().slice(0, 7)}"></label>
+        <div class="btns full"><button class="btn" id="bSefin">${icon('refresh')}Alíquota do serviço</button><button class="btn" id="bHist">Histórico de alíquotas</button><button class="btn" id="bReg">Regimes especiais</button><button class="btn" id="bConv">Convênio do município</button><button class="btn primary" id="bAdd">${icon('plus')}Cadastrar código</button></div></div>
         <div class="alert info small" style="margin-bottom:12px">${icon('info')}<div>Os códigos de tributação municipal (3 dígitos) são definidos por cada município no Sistema Nacional. Consulte-os pela API de parâmetros municipais (exige certificado) ou cadastre-os manualmente para uso rápido na emissão.</div></div>`;
       autocomplete($('#mNome'), { buscar: async x => (await get(`/api/tabelas/municipios?q=${encodeURIComponent(x)}`)).itens, render: m => `<b>${m.codigo}</b>${esc(m.nome)}/${m.uf}`, escolher: m => { $('#mCod').value = m.codigo; $('#mNome').value = `${m.nome}/${m.uf}`; municipal(); } });
-      const consultar = async tipo => {
+      const consultar = async (tipo, botao) => {
         if (!c) return toast('Selecione uma empresa.', 'error');
+        const mun = $('#mCod').value, trib = $('#mTrib').value.replace(/\D/g, ''), cm = $('#mMun').value.replace(/\D/g, '');
+        if (!/^\d{7}$/.test(mun)) { $('#mNome').focus(); return toast('Escolha o município na lista.', 'error'); }
+        if (tipo !== 'convenio' && !/^\d{6}$/.test(trib)) { $('#mTrib').focus(); return toast('Informe o código de tributação nacional (cTribNac) com 6 dígitos, ex.: 01.01.01.', 'error'); }
+        if (cm && !/^\d{3}$/.test(cm)) { $('#mMun').focus(); return toast('O código municipal tem 3 dígitos.', 'error'); }
+        const txt = botao.innerHTML; botao.disabled = true; botao.innerHTML = `${icon('refresh')}Consultando…`;
         try {
-          const r = await get(`/api/parametros-municipais?contribuinte_id=${c.id}&municipio=${$('#mCod').value}&servico=${$('#mTrib').value.replace(/\D/g, '')}&tipo=${tipo}`);
-          modal({ titulo: 'Parâmetros municipais (Sefin Nacional)', wide: true, corpo: `<p class="small muted">HTTP ${r.status}</p><pre class="xml">${esc(JSON.stringify(r.dados, null, 2))}</pre>` });
+          const r = await get(`/api/parametros-municipais?contribuinte_id=${c.id}&municipio=${mun}&servico=${trib}&ctribmun=${cm}&competencia=${$('#mComp').value}&tipo=${tipo}`);
+          const tent = (r.tentativas || []).map(t => `<tr><td class="small"><code>${esc(t.url.replace(/^https:\/\/[^/]+/, ''))}</code></td><td class="num">${t.status || '—'}</td></tr>`).join('');
+          modal({
+            titulo: `Parâmetros municipais — ${esc(r.municipio?.nome || mun)}`, wide: true,
+            corpo: (r.ok
+              ? `<div class="alert ok small" style="margin-bottom:12px">${icon('check')}<div>Resposta da Sefin Nacional para a competência ${esc(r.competencia.slice(5, 7))}/${esc(r.competencia.slice(0, 4))}.</div></div>
+                ${r.aliquotas?.length ? `<div class="table-wrap" style="margin-bottom:12px"><table><thead><tr><th>Serviço</th><th class="num">Alíquota</th><th>Início</th><th>Fim</th></tr></thead><tbody>${r.aliquotas.map(a => `<tr><td><code>${esc(a.servico || '')}</code></td><td class="num">${num(a.aliquota)}%</td><td>${esc((a.inicio || '').slice(0, 10).split('-').reverse().join('/'))}</td><td>${esc((a.fim || '').slice(0, 10).split('-').reverse().join('/') || '—')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+                <details><summary class="small muted">Resposta completa</summary><pre class="xml">${esc(JSON.stringify(r.dados, null, 2))}</pre></details>`
+              : `<div class="alert warn" style="margin-bottom:12px">${icon('alert')}<div>${esc(r.mensagem || `HTTP ${r.status}`)}</div></div>
+                <p class="small muted">Sem parâmetros, a emissão continua possível: informe a alíquota do ISS manualmente ou cadastre o código municipal nesta tela.</p>`)
+              + (tent ? `<details style="margin-top:10px"><summary class="small muted">Rotas consultadas</summary><div class="table-wrap"><table><thead><tr><th>Rota</th><th class="num">HTTP</th></tr></thead><tbody>${tent}</tbody></table></div></details>` : ''),
+          });
           municipal();
-        } catch (e) { toast(e.message, 'error'); }
+        } catch (e) { toast(e.message, 'error'); } finally { botao.disabled = false; botao.innerHTML = txt; }
       };
-      $('#bSefin').onclick = () => consultar('servico');
-      $('#bConv').onclick = () => consultar('convenio');
+      $('#bSefin').onclick = e => consultar('servico', e.currentTarget);
+      $('#bHist').onclick = e => consultar('historico', e.currentTarget);
+      $('#bReg').onclick = e => consultar('regimes', e.currentTarget);
+      $('#bConv').onclick = e => consultar('convenio', e.currentTarget);
       $('#bAdd').onclick = () => modal({
         titulo: 'Cadastrar código de tributação municipal', corpo: `<div class="grid g2"><label class="f"><span>cTribNac (6 dígitos)</span><input id="aN" value="${$('#mTrib').value}"></label><label class="f"><span>cTribMun (3 dígitos)</span><input id="aM" maxlength="3"></label>
           <label class="f full"><span>Descrição</span><input id="aD"></label><label class="f"><span>Alíquota (%)</span><input id="aA" type="number" step="0.01"></label></div>`,
