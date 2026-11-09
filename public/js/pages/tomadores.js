@@ -1,10 +1,11 @@
 import { get, post, put, del } from '../api.js';
+import { preencherPelaReceita, completarCadastros } from '../receita.js';
 import { $, $$, esc, icon, modal, toast, confirmar, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, moeda, vazio } from '../ui.js';
 
 export async function paginaTomadores(view) {
   view.innerHTML = `
   <div class="page-head"><div><h1>Tomadores / Clientes</h1><p>Cadastro reutilizado nas emissões (atualizado automaticamente ao emitir)</p></div>
-    <button class="btn primary" id="btnNovo">${icon('plus')}Novo tomador</button></div>
+    <div class="btns"><button class="btn" id="btnCompletar" title="Preenche endereço, contatos e inscrição municipal que estiverem vazios">${icon('refresh')}Completar pela Receita</button><button class="btn primary" id="btnNovo">${icon('plus')}Novo tomador</button></div></div>
   <div class="card"><div class="card-head"><input id="busca" placeholder="Buscar por nome, CNPJ/CPF ou e-mail…" style="max-width:420px"><span class="muted small" id="qtd"></span></div><div id="lista"></div></div>`;
   async function carregar() {
     const q = $('#busca').value.trim();
@@ -20,6 +21,7 @@ export async function paginaTomadores(view) {
   }
   let t; $('#busca').oninput = () => { clearTimeout(t); t = setTimeout(carregar, 250); };
   $('#btnNovo').onclick = () => formTomador(null, carregar);
+  $('#btnCompletar').onclick = () => completarCadastros('tomadores', carregar);
   carregar();
 }
 
@@ -28,7 +30,7 @@ export async function formTomador(t, depois) {
     ${campo('Tipo', `<select name="tipo_doc">${opts({ CNPJ: 'CNPJ', CPF: 'CPF', NIF: 'NIF (exterior)', SEM: 'Sem identificação' }, t?.tipo_doc || 'CNPJ')}</select>`)}
     ${campo('Documento', `<div class="input-group"><input name="documento" data-mask="doc"><button type="button" class="btn sm" id="bCnpj">${icon('search')}</button></div>`)}
     ${campo('Nome / Razão social', '<input name="nome" required>', { cls: 'span2', req: true })}
-    ${campo('Inscrição municipal', '<input name="im">')}${campo('E-mail', '<input type="email" name="email">')}${campo('Telefone', '<input name="fone">')}
+    ${campo('Inscrição municipal', '<input name="im">')}${campo('E-mail', '<input type="email" name="email">')}${campo('Telefone', '<input name="fone" data-mask="fone" inputmode="tel">')}
     ${campo('CEP', '<input name="cep" data-mask="cep">')}${campo('Logradouro', '<input name="logradouro">', { cls: 'span2' })}${campo('Número', '<input name="numero">')}${campo('Complemento', '<input name="complemento">')}
     ${campo('Bairro', '<input name="bairro">')}${campo('Município', '<input id="mNome"><input type="hidden" name="cod_municipio">', { cls: 'span2' })}
     ${campo('País (exterior)', '<input name="pais" value="BR" maxlength="2">')}${campo('Cidade exterior', '<input name="cidade_ext">')}${campo('Estado/província', '<input name="estado_ext">')}${campo('Código postal', '<input name="cod_postal_ext">')}
@@ -51,10 +53,7 @@ export async function formTomador(t, depois) {
       autocomplete($('#mNome', bg), { buscar: async q => (await get(`/api/tabelas/municipios?q=${encodeURIComponent(q)}`)).itens, render: m => `<b>${m.codigo}</b>${esc(m.nome)}/${m.uf}`, escolher: m => { f.cod_municipio.value = m.codigo; $('#mNome', bg).value = `${m.nome}/${m.uf}`; } });
       $('#bCnpj', bg).onclick = async () => {
         try {
-          const d = await get(`/api/consulta/cnpj/${so(f.documento.value)}`);
-          preencherForm(f, { nome: d.nome, cep: d.cep, logradouro: d.logradouro, numero: d.numero, complemento: d.complemento, bairro: d.bairro, cod_municipio: d.cod_municipio, email: d.email, fone: d.fone });
-          const m = (await get(`/api/tabelas/municipios?q=${d.cod_municipio}`)).itens[0];
-          if (m) $('#mNome', bg).value = `${m.nome}/${m.uf}`;
+          await preencherPelaReceita(f, f.documento.value, { campoMun: $('#mNome', bg), extra: () => ({}) });
         } catch (e) { toast(e.message, 'error'); }
       };
     },

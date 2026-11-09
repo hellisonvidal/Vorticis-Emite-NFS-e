@@ -12,6 +12,7 @@ import android.print.PrintDocumentAdapter;
 import android.print.PrintManager;
 import android.print.PdfExportador;
 import android.provider.MediaStore;
+import android.security.KeyChain;
 import android.util.Base64;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -32,7 +33,15 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.FileInputStream;
 import java.net.URL;
+import java.net.Socket;
 import java.security.KeyStore;
+import java.security.Principal;
+import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.cert.X509Certificate;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.X509ExtendedKeyManager;
+import javax.net.ssl.KeyManager;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +58,7 @@ import javax.net.ssl.SSLContext;
  *  - compartilhar: abre o compartilhamento do Android (e-mail, WhatsApp, Drive…)
  *  - imprimir: serviço de impressão do sistema (inclui "Salvar como PDF")
  *  - pdf: gera o PDF A4 de um HTML diretamente (DANFSe), sem diálogo
+ *  - escolherCertificado / assinarKeychain: certificados instalados no aparelho (KeyChain)
  */
 @CapacitorPlugin(name = "VorticisNativo")
 public class VorticisNativoPlugin extends Plugin {
@@ -64,6 +74,7 @@ public class VorticisNativoPlugin extends Plugin {
         String senha = call.getString("senha", "");
         JSObject cabecalhos = call.getObject("headers", new JSObject());
         boolean publico = Boolean.TRUE.equals(call.getBoolean("publico", false));
+        String alias = call.getString("alias");
         HttpURLConnection con = null;
         try {
             if (url == null || !(url.startsWith("https://") || (publico && url.startsWith("http://")))) {
@@ -78,6 +89,11 @@ public class VorticisNativoPlugin extends Plugin {
                 kmf.init(ks, senha.toCharArray());
                 SSLContext ctx = SSLContext.getInstance("TLS");
                 ctx.init(kmf.getKeyManagers(), null, null);
+                ((HttpsURLConnection) con).setSSLSocketFactory(ctx.getSocketFactory());
+            } else if (alias != null && !alias.isEmpty() && con instanceof HttpsURLConnection) {
+                // Certificado instalado no Android (KeyChain): a chave não sai do sistema
+                SSLContext ctx = SSLContext.getInstance("TLS");
+                ctx.init(new KeyManager[]{ keyManagerKeyChain(alias) }, null, null);
                 ((HttpsURLConnection) con).setSSLSocketFactory(ctx.getSocketFactory());
             }
             con.setRequestMethod(metodo);
@@ -117,6 +133,55 @@ public class VorticisNativoPlugin extends Plugin {
         } finally {
             if (con != null) con.disconnect();
         }
+    }
+
+    private X509ExtendedKeyManager keyManagerKeyChain(final String alias) throws Exception {
+        final PrivateKey chave = KeyChain.getPrivateKey(getContext(), alias);
+        final X509Certificate[] cadeia = KeyChain.getCertificateChain(getContext(), alias);
+        if (chave == null || cadeia == null) throw new Exception("o certificado \"" + alias + "\" não está mais liberado para o aplicativo");
+        return new X509ExtendedKeyManager() {
+            @Override public String chooseClientAlias(String[] t, Principal[] i, Socket s) { return alias; }
+            @Override public String chooseEngineClientAlias(String[] t, Principal[] i, SSLEngine e) { return alias; }
+            @Override public X509Certificate[] getCertificateChain(String a) { return cadeia; }
+            @Override public PrivateKey getPrivateKey(String a) { return chave; }
+            @Override public String[] getClientAliases(String t, Principal[] i) { return new String[]{ alias }; }
+            @Override public String[] getServerAliases(String t, Principal[] i) { return null; }
+            @Override public String chooseServerAlias(String t, Principal[] i, Socket s) { return null; }
+        };
+    }
+
+    // Seletor do sistema com os certificados instalados no aparelho (Configurações → Segurança → Credenciais)
+    @PluginMethod
+    public void escolherCertificado(PluginCall call) {
+        KeyChain.choosePrivateKeyAlias(getActivity(), alias -> {
+            if (alias == null) { call.resolve(new JSObject()); return; }
+            try {
+                X509Certificate[] cadeia = KeyChain.getCertificateChain(getContext(), alias);
+                if (cadeia == null || cadeia.length == 0) { call.reject("Certificado sem cadeia acessível."); return; }
+                JSObject r = new JSObject();
+                r.put("id", alias);
+                r.put("der", Base64.encodeToString(cadeia[0].getEncoded(), Base64.NO_WRAP));
+                call.resolve(r);
+            } catch (Exception e) { call.reject("Não foi possível ler o certificado: " + e.getMessage()); }
+        }, new String[]{"RSA"}, null, null, -1, null);
+    }
+
+    // Assinatura RSA PKCS#1 v1.5 com a chave do KeyChain (DPS, eventos e prova de posse no login)
+    @PluginMethod
+    public void assinarKeychain(PluginCall call) {
+        String alias = call.getString("alias");
+        String dados = call.getString("dados", "");
+        String alg = "sha256".equals(call.getString("alg")) ? "SHA256withRSA" : "SHA1withRSA";
+        try {
+            PrivateKey chave = KeyChain.getPrivateKey(getContext(), alias);
+            if (chave == null) { call.reject("O certificado não está liberado para o aplicativo. Escolha-o novamente."); return; }
+            Signature sig = Signature.getInstance(alg);
+            sig.initSign(chave);
+            sig.update(Base64.decode(dados, Base64.DEFAULT));
+            JSObject r = new JSObject();
+            r.put("assinatura", Base64.encodeToString(sig.sign(), Base64.NO_WRAP));
+            call.resolve(r);
+        } catch (Exception e) { call.reject("Falha ao assinar com o certificado: " + e.getMessage()); }
     }
 
     @PluginMethod

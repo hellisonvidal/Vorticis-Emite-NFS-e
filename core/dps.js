@@ -8,7 +8,8 @@ export const VERSAO = '1.01';
 export const VER_APLIC = 'VorticisEmiteNFS-1.0';
 
 // Escape de texto compatível com a forma canônica C14N (& < > CR)
-const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
+// remove caracteres de controle inválidos em XML 1.0 (mantém tabulação e quebra de linha)
+const esc = s => String(s ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
 const so = s => String(s ?? '').replace(/\D/g, '');
 const dec = (v, casas = 2) => {
   const n = +v || 0;
@@ -188,7 +189,7 @@ const DSIG = 'http://www.w3.org/2000/09/xmldsig#';
  * O XML é gerado por este módulo já na forma canônica (sem espaços, escape C14N, sem elementos vazios),
  * então a canonicalização do elemento referenciado é o próprio trecho com a declaração de namespace herdada.
  */
-export function assinar(xml, tag, { keyPem, certPem }, alg = 'sha1') {
+function prepararAssinatura(xml, tag, alg) {
   const a = ALG[alg] || ALG.sha1;
   const ini = xml.indexOf(`<${tag} `);
   const fimTag = `</${tag}>`;
@@ -205,16 +206,38 @@ export function assinar(xml, tag, { keyPem, certPem }, alg = 'sha1') {
     `<SignatureMethod Algorithm="${a.sig}"></SignatureMethod><Reference URI="#${id}"><Transforms>` +
     `<Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></Transform><Transform Algorithm="${C14N}"></Transform></Transforms>` +
     `<DigestMethod Algorithm="${a.dig}"></DigestMethod><DigestValue>${digest}</DigestValue></Reference></SignedInfo>`;
-  const key = forge.pki.privateKeyFromPem(keyPem);
-  const mdS = a.md(); mdS.update(signedInfo, 'utf8');
-  const valor = forge.util.encode64(key.sign(mdS));
+  return { a, signedInfo, fim };
+}
+function concluirAssinatura(xml, { signedInfo, fim }, valor, certPem) {
   const cert = certPem.replace(/-----[^-]+-----|\s/g, '');
   const sig = `<Signature xmlns="${DSIG}">${signedInfo.replace(` xmlns="${DSIG}"`, '')}<SignatureValue>${valor}</SignatureValue>` +
     `<KeyInfo><X509Data><X509Certificate>${cert}</X509Certificate></X509Data></KeyInfo></Signature>`;
   return xml.slice(0, fim) + sig + xml.slice(fim);
 }
 
-export const gzipB64 = xml => b64(gzipSync(utf8(xml)));
+/**
+ * Assinatura XMLDSig enveloped (C14N inclusiva) do elemento `tag` com a chave privada em PEM (certificado A1 em arquivo).
+ */
+export function assinar(xml, tag, { keyPem, certPem }, alg = 'sha1') {
+  const p = prepararAssinatura(xml, tag, alg);
+  const key = forge.pki.privateKeyFromPem(keyPem);
+  const mdS = p.a.md(); mdS.update(p.signedInfo, 'utf8');
+  return concluirAssinatura(xml, p, forge.util.encode64(key.sign(mdS)), certPem);
+}
+
+/**
+ * Mesma assinatura, aceitando também certificados do repositório do sistema (Windows/Android), em que a chave
+ * privada não sai do sistema: `cert.assinador(bytes, 'sha1'|'sha256')` devolve a assinatura RSA PKCS#1 v1.5.
+ */
+export async function assinarXml(xml, tag, cert, alg = 'sha1') {
+  if (cert.keyPem) return assinar(xml, tag, cert, alg);
+  if (!cert.assinador) throw new Error('Certificado sem chave privada disponível para assinatura.');
+  const p = prepararAssinatura(xml, tag, alg);
+  const valor = await cert.assinador(utf8(p.signedInfo), ALG[alg] ? alg : 'sha1');
+  return concluirAssinatura(xml, p, b64(valor), cert.certPem);
+}
+
+export const gzipB64 = xml => b64(gzipSync(utf8('<?xml version="1.0" encoding="UTF-8"?>' + String(xml).replace(/^\uFEFF/, '').replace(/^\s*<\?xml[^>]*\?>\s*/, ''))));
 export const gunzipB64 = s => deUtf8(gunzipSync(unb64(s)));
 
 // ----------- Simulação local (sem envio à Sefin) -----------

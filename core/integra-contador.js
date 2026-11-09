@@ -24,7 +24,7 @@ export function criarIntegraContador(http) {
     const c = cache.get(k);
     if (c && c.expira > Date.now() + 60e3) return c;
     const r = await http({
-      url: SERPRO.auth, method: 'POST', pfx: cert.pfx, senha: cert.senha,
+      url: SERPRO.auth, method: 'POST', pfx: cert.pfx, senha: cert.senha, certSistema: cert.sistema,
       headers: { Authorization: `Basic ${b64(utf8(`${consumerKey}:${consumerSecret}`))}`, 'Role-Type': 'TERCEIROS', 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: 'grant_type=client_credentials',
     });
@@ -65,7 +65,7 @@ export function criarIntegraContador(http) {
     };
     const r = await http({
       url: `${trial ? SERPRO.trial : SERPRO.producao}/Consultar`, method: 'POST', headers, body: JSON.stringify(pedido),
-      ...(trial ? {} : { pfx: p.cert.pfx, senha: p.cert.senha }),
+      ...(trial ? {} : { pfx: p.cert.pfx, senha: p.cert.senha, certSistema: p.cert.sistema }),
     });
     const j = corpo(r);
     const mensagens = (j?.mensagens || []).map(m => `${m.codigo || ''} ${m.texto || ''}`.trim());

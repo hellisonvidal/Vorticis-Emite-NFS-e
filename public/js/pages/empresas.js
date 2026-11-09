@@ -1,4 +1,5 @@
 import { get, post, put, del, cached } from '../api.js';
+import { preencherPelaReceita, completarCadastros } from '../receita.js';
 import { $, esc, icon, modal, toast, confirmar, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, badge, AMB, dataBR, vazio } from '../ui.js';
 import { estado } from '../estado.js';
 import { carregarContribs } from '../app.js';
@@ -9,7 +10,7 @@ export async function paginaEmpresas(view, params) {
   const lista = estado.contribs;
   view.innerHTML = `
   <div class="page-head"><div><h1>Empresas emitentes</h1><p>Prestadores de serviço que emitem NFS-e por este sistema (próprias ou de clientes via procuração)</p></div>
-    <button class="btn primary" id="btnNova">${icon('plus')}Nova empresa</button></div>
+    <div class="btns"><button class="btn" id="btnCompletar" title="Preenche endereço, contatos e inscrição municipal que estiverem vazios">${icon('refresh')}Completar pela Receita</button><button class="btn primary" id="btnNova">${icon('plus')}Nova empresa</button></div></div>
   ${lista.length ? `<div class="grid g3">${lista.map(c => `
     <div class="card" style="${c.ativo ? '' : 'opacity:.55'}">
       <div class="card-head"><div><h3>${esc(c.nome_fantasia || c.razao_social)}</h3><div class="small muted">${fmtDoc(c.documento)} · ${esc(c.municipio)}</div></div>${badge(c.ambiente, AMB)}</div>
@@ -22,6 +23,7 @@ export async function paginaEmpresas(view, params) {
       <div class="btns" style="margin-top:14px"><button class="btn sm" data-ed="${c.id}">${icon('edit')}Editar</button><button class="btn sm" data-num="${c.id}">${icon('list')}Numeração</button><button class="btn sm" data-diag="${c.id}">${icon('shield')}Diagnóstico</button><button class="btn sm" data-sel="${c.id}">Usar esta</button>${c.ativo ? `<button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button>` : '<span class="badge">inativa</span>'}</div>
     </div>`).join('')}</div>` : `<div class="card">${vazio('Nenhuma empresa cadastrada. Cadastre a primeira para começar a emitir.', 'building')}</div>`}`;
   $('#btnNova').onclick = () => formEmpresa();
+  $('#btnCompletar').onclick = () => completarCadastros('contribuintes', () => paginaEmpresas(view, params));
   view.querySelectorAll('[data-ed]').forEach(b => b.onclick = () => formEmpresa(lista.find(c => c.id === +b.dataset.ed)));
   view.querySelectorAll('[data-num]').forEach(b => b.onclick = () => abrirNumeracao(lista.find(c => c.id === +b.dataset.num), () => paginaEmpresas(view, new URLSearchParams())).catch(e => toast(e.message, 'error')));
   view.querySelectorAll('[data-diag]').forEach(b => b.onclick = () => abrirDiagnostico(lista.find(c => c.id === +b.dataset.diag), () => paginaEmpresas(view, new URLSearchParams())).catch(e => toast(e.message, 'error')));
@@ -49,7 +51,7 @@ export async function paginaEmpresas(view, params) {
       ${campo('Número', '<input name="numero">')}
       ${campo('Bairro', '<input name="bairro">')}
       ${campo('Município (emissor)', '<input id="munNome" required><input type="hidden" name="cod_municipio">', { req: true, cls: 'span2' })}
-      ${campo('Telefone', '<input name="fone">')}
+      ${campo('Telefone', '<input name="fone" data-mask="fone" inputmode="tel">')}
       <h3 class="full" style="margin-top:6px">Tributação</h3>
       ${campo('Regime tributário', `<select name="regime">${opts(meta.regimes, c?.regime || 'SN')}</select>`, { cls: 'span2', req: true })}
       ${campo('Regime especial (ISS)', `<select name="reg_esp_trib">${opts(meta.regEspTrib, c?.reg_esp_trib || '0')}</select>`, { cls: 'span2' })}
@@ -92,11 +94,8 @@ export async function paginaEmpresas(view, params) {
         });
         $('#bCnpj', bg)?.addEventListener('click', async () => {
           try {
-            const d = await get(`/api/consulta/cnpj/${so(f.documento.value)}`);
-            preencherForm(f, { razao_social: d.nome, nome_fantasia: d.nome_fantasia, cep: d.cep, logradouro: d.logradouro, numero: d.numero, bairro: d.bairro, cod_municipio: d.cod_municipio, email: d.email, fone: d.fone, regime: d.mei ? 'MEI' : d.simples ? 'SN' : f.regime.value });
-            const m = (await get(`/api/tabelas/municipios?q=${d.cod_municipio}`)).itens[0];
-            if (m) $('#munNome', bg).value = `${m.nome}/${m.uf}`;
-            toast(`Dados de ${d.nome} carregados${d.mei ? ' (MEI)' : d.simples ? ' (Simples Nacional)' : ''}.`, 'ok');
+            await preencherPelaReceita(f, f.documento.value, { nome: 'razao_social', campoMun: $('#munNome', bg),
+              extra: d => ({ nome_fantasia: d.nome_fantasia, regime: d.mei ? 'MEI' : d.simples ? 'SN' : f.regime.value }) });
           } catch (e) { toast(e.message, 'error'); }
         });
       },

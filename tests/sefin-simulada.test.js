@@ -73,6 +73,7 @@ async function http(req) {
   }
   if (p === '/nfse' && req.method === 'POST') {
     const dps = decodificarXml(JSON.parse(req.body).dpsXmlGZipB64);
+    if (!/^<\?xml version="1\.0" encoding="UTF-8"\?>/.test(dps)) return resp(400, { erros: [{ Codigo: 'E1229', Descricao: 'Xml não está utilizando codificação UTF-8.' }] });
     const id = dps.match(/Id="(DPS\d+)"/)[1];
     if (estado.falharRede) { estado.falharRede = false; estado.usadas.add(id); guardar(id, dps); throw new Error('socket hang up'); }
     if (estado.usadas.has(id) || [...estado.nfse.values()].some(v => v.idDps === id)) return resp(400, { erros: [{ Codigo: 'E0014', Descricao: 'Conjunto de Série, Número... já existe' }] });

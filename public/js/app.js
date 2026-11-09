@@ -1,5 +1,6 @@
 import { get, post, sessao } from './api.js';
-import { $, $$, esc, icon, fmtDoc, badge, AMB, toast } from './ui.js';
+import { $, $$, esc, icon, fmtDoc, badge, AMB, toast, mascaras } from './ui.js';
+mascaras();
 import { estado } from './estado.js';
 import { telaLogin } from './pages/login.js';
 import { paginaDashboard } from './pages/dashboard.js';
@@ -103,3 +104,8 @@ export async function iniciar() {
 
 window.addEventListener('hashchange', () => { if (sessao.token && $('#view')) rota(); });
 iniciar();
+
+// Navegador: confirmação ao fechar a aba com sessão aberta (Windows e Android usam diálogo nativo)
+if (!/Electron/i.test(navigator.userAgent) && !globalThis.__vorticisApi && !globalThis.Capacitor) {
+  addEventListener('beforeunload', e => { if (sessao.token) { e.preventDefault(); e.returnValue = ''; } });
+}

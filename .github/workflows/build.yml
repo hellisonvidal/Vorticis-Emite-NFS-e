@@ -32,6 +32,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
+      - name: Certificados do repositório do Windows (PowerShell/.NET)
+        run: node --test tests/windows/repositorio.test.mjs
       - name: Versão a partir da tag
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash

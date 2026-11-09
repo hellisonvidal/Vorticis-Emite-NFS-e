@@ -29,7 +29,7 @@ const path = require('path');
   const render = async (tam, arquivo, { fundo = false, escala = 1, redondo = false } = {}) => {
     const inner = Math.round(tam * escala);
     await p.setViewportSize({ width: tam, height: tam });
-    await p.setContent(`<html><body style="margin:0;width:${tam}px;height:${tam}px;display:grid;place-items:center;background:${fundo ? '#4f46e5' : 'transparent'}">
+    await p.setContent(`<html><body style="margin:0;width:${tam}px;height:${tam}px;display:grid;place-items:center;background:${fundo ? '#ffffff' : 'transparent'}">
       <div style="width:${inner}px;height:${inner}px;${redondo ? 'border-radius:50%;overflow:hidden' : ''}">${svg.replace('<svg ', `<svg width="${inner}" height="${inner}" `)}</div></body></html>`);
     fs.mkdirSync(path.dirname(arquivo), { recursive: true });
     await p.screenshot({ path: arquivo, omitBackground: !fundo });

@@ -2,22 +2,25 @@
 // Sobe o servidor local em 127.0.0.1 (porta aleatória) e abre a interface numa janela nativa.
 import { app, BrowserWindow, Menu, shell, dialog } from 'electron';
 import path from 'node:path';
+import { certSistemaWindows } from './certificados-windows.js';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NOME = 'Vorticis Emite NFS';
 app.setName(NOME);
+// Interface em português (formato de data dd/mm/aaaa nos campos de data, textos do Chromium)
+app.commandLine.appendSwitch('lang', 'pt-BR');
 if (process.platform === 'win32') app.setAppUserModelId('br.com.vorticis.emitenfs');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
-let janela, servidor, base;
+let janela, servidor, base, saindo = false;
 const pastaDados = () => path.join(app.getPath('userData'), 'dados');
 
 async function iniciar() {
   process.removeAllListeners('warning'); // oculta o aviso "SQLite is experimental"
   const { iniciarServidor } = await import('../server/index.js');
-  servidor = await iniciarServidor({ porta: 0, host: '127.0.0.1', dataDir: pastaDados(), nome: 'Windows', gerarPdf });
+  servidor = await iniciarServidor({ porta: 0, host: '127.0.0.1', dataDir: pastaDados(), nome: 'Windows', gerarPdf, certSistema: process.platform === 'win32' ? certSistemaWindows : undefined });
   base = `http://127.0.0.1:${servidor.porta}`;
   criarJanela();
 }
@@ -39,6 +42,13 @@ function criarJanela() {
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true },
   });
   janela.once('ready-to-show', () => { janela.maximize(); janela.show(); });
+  // Confirmação antes de fechar (botão X, Alt+F4 ou menu Arquivo → Sair)
+  janela.on('close', e => {
+    if (saindo) return;
+    e.preventDefault();
+    const r = dialog.showMessageBoxSync(janela, { type: 'question', title: NOME, message: 'Deseja realmente sair do Vorticis Emite NFS?', detail: 'Notas em digitação que não foram salvas como rascunho serão perdidas.', buttons: ['Sair', 'Cancelar'], defaultId: 1, cancelId: 1, noLink: true });
+    if (r === 0) { saindo = true; janela.close(); }
+  });
   janela.loadURL(base);
 
   // Links externos no navegador padrão; PDFs (DANFSe) e prévias em janela própria

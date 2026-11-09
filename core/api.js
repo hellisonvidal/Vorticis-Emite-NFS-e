@@ -6,13 +6,13 @@
 //   req = { method, path, query, body, token }
 //   resposta = { status, json } | { status, arquivo: { nome, tipo, dados: Uint8Array|string, inline } }
 import { iniciarBanco } from './banco.js';
-import { hashSenha, conferirSenha, novoToken, unb64 } from './seguranca.js';
-import { lerPfx, resumoCert, completarCadeia } from './certificado.js';
+import { hashSenha, conferirSenha, novoToken, unb64, randomBytes } from './seguranca.js';
+import { lerPfx, resumoCert, completarCadeia, lerCertificadoDer, conferirAssinatura } from './certificado.js';
 import { calcular, sugerirRetencoes, REGIMES, REG_ESP_TRIB, ALIQ_IBSCBS } from './tributos.js';
-import { montarDPS, montarCancelamento, assinar, chaveSimulada, nfseSimulada, dataHoraBR, idDPS } from './dps.js';
+import { montarDPS, montarCancelamento, assinarXml, chaveSimulada, nfseSimulada, dataHoraBR, idDPS } from './dps.js';
 import { criarSefin, decodificarXml } from './sefin.js';
 import { gerarDANFSe, gerarDANFSeLote, OPCOES_DANFSE } from './danfse.js';
-import { resumoNFSe } from './xml.js';
+import { resumoNFSe, parseXml, busca, no, txt } from './xml.js';
 import { criarIntegraContador, procuracaoNFSe } from './integra-contador.js';
 import { T, buscar, sugestoes, nomeMunicipio, MUN, CTRIB, NBS } from './tabelas.js';
 import { so, docValido, validarEmissao } from './validacao.js';
@@ -102,6 +102,13 @@ export function criarApi(P) {
   async function carregarCertificado(id, uid) {
     const row = db.prepare('SELECT * FROM certificados WHERE id = ? AND usuario_id = ?').get(id, uid);
     if (!row) falha('Certificado não encontrado.');
+    if (row.origem === 'sistema') {
+      // Certificado instalado no Windows/Android: a chave privada fica no sistema; assinatura e TLS são feitos por ele
+      if (!P.certSistema) falha(`O certificado "${row.apelido || row.titular}" está instalado em outro dispositivo (repositório do sistema) e não pode ser usado nesta versão.`);
+      if (new Date(row.valido_ate) < new Date()) falha(`Certificado "${row.apelido || row.titular}" vencido em ${row.valido_ate.slice(0, 10)}.`);
+      return { titular: row.titular, documento: row.documento, tipo_doc: row.tipo_doc, valido_ate: row.valido_ate, certPem: row.cert_pem, row,
+        sistema: row.ref_sistema, assinador: (dados, alg) => P.certSistema.assinar(row.ref_sistema, dados, alg) };
+    }
     const pfx = await P.cofre.decrypt(row.pfx_enc, true);
     const senha = await P.cofre.decrypt(row.senha_enc);
     const info = lerPfx(pfx, senha);
@@ -170,6 +177,26 @@ export function criarApi(P) {
     if (q) rows = buscar(rows, q, ['ctribnac', 'ctribmun', 'descricao']).itens;
     return rows.map(r => ({ ...r, municipio: nomeMunicipio(r.cod_municipio), servico: CTRIB.get(r.ctribnac)?.descricao || '' }));
   });
+  // Opções de código de tributação municipal para a emissão: tabela do município (inclusive importada da Sefin),
+  // serviços favoritos e códigos já usados em notas da empresa – os do cTribNac escolhido primeiro.
+  GET('/api/codigos-municipais/opcoes', ({ user, query: { contribuinte_id, ctribnac } }) => {
+    const c = contribuinte(user.id, contribuinte_id);
+    const cn = so(ctribnac);
+    const mapa = new Map();
+    const add = (o, origem) => {
+      const k = `${so(o.ctribnac)}|${so(o.ctribmun)}`;
+      if (!/^\d{3}$/.test(so(o.ctribmun)) || mapa.has(k)) return;
+      mapa.set(k, { ctribmun: so(o.ctribmun), ctribnac: so(o.ctribnac), descricao: o.descricao || '', aliquota: o.aliquota ?? null, origem });
+    };
+    db.prepare('SELECT * FROM codigos_municipais WHERE cod_municipio = ?').all(c.cod_municipio).forEach(r => add(r, r.origem === 'sefin' ? 'Sefin' : 'tabela do município'));
+    db.prepare('SELECT ctribnac, ctribmun, nome AS descricao, aliq_iss AS aliquota FROM servicos WHERE usuario_id = ? AND (contribuinte_id = ? OR contribuinte_id IS NULL) AND ctribmun <> \'\'').all(user.id, c.id).forEach(r => add(r, 'serviço favorito'));
+    for (const n of db.prepare("SELECT dados FROM notas WHERE usuario_id = ? AND contribuinte_id = ? AND status IN ('autorizada','cancelada','substituida') ORDER BY id DESC LIMIT 500").all(user.id, c.id)) {
+      const f = json(n.dados).form || {};
+      if (f.ctribmun) add({ ctribnac: f.ctribnac, ctribmun: f.ctribmun, descricao: (f.descricao || '').slice(0, 80), aliquota: f.aliq_iss }, 'usado em notas');
+    }
+    return [...mapa.values()].map(o => ({ ...o, servico: CTRIB.get(o.ctribnac)?.descricao || '' }))
+      .sort((a, b) => (b.ctribnac === cn) - (a.ctribnac === cn) || a.ctribnac.localeCompare(b.ctribnac) || a.ctribmun.localeCompare(b.ctribmun));
+  });
   POST('/api/codigos-municipais', ({ body: { cod_municipio, ctribnac, ctribmun, descricao, aliquota } }) => {
     if (!MUN.has(String(cod_municipio))) falha('Município inválido.');
     if (!/^\d{6}$/.test(so(ctribnac)) || !/^\d{3}$/.test(so(ctribmun))) falha('Informe cTribNac (6 dígitos) e cTribMun (3 dígitos).');
@@ -208,6 +235,67 @@ export function criarApi(P) {
     if (db.prepare('SELECT 1 FROM certificados WHERE usuario_id = ? AND serial = ?').get(user.id, info.serial)) falha('Este certificado já está cadastrado.');
     const id = await guardarCertificado(user.id, bytes, senha, info, apelido);
     audit(user.id, 'certificado.add', `${info.titular} ${info.documento}`);
+    return resumoCert(db.prepare('SELECT * FROM certificados WHERE id = ?').get(id));
+  });
+  // ---- certificados instalados no sistema (repositório do Windows / KeyChain do Android)
+  async function certificadosSistema() {
+    if (!P.certSistema) return null;
+    const lista = await P.certSistema.listar();
+    return lista.map(c => {
+      try {
+        const info = lerCertificadoDer(c.der);
+        return { id: c.id, a3: !!c.a3, info, titular: info.titular || c.nome || '', documento: info.documento, tipo_doc: info.tipo_doc, emissor: info.emissor,
+          valido_ate: info.valido_ate, vencido: new Date(info.valido_ate) < new Date() };
+      } catch { return null; }
+    }).filter(Boolean);
+  }
+  async function certSistemaPorId(id) {
+    const lista = await certificadosSistema();
+    if (!lista) falha('Esta versão não acessa certificados instalados no sistema. Use o arquivo .pfx.', 501);
+    // Android: listar() abre o seletor do sistema e devolve apenas o escolhido
+    const c = id ? lista.find(x => x.id === id) : lista[0];
+    if (!c) falha(id ? 'Certificado não encontrado no repositório do sistema.' : 'Nenhum certificado foi escolhido.');
+    if (c.vencido) falha(`Certificado vencido em ${c.valido_ate.slice(0, 10)}.`);
+    if (!c.documento) falha('Certificado sem CPF/CNPJ ICP-Brasil identificável.');
+    return c;
+  }
+  // Prova de posse: a chave do certificado assina um desafio aleatório (pode pedir o PIN do token/cartão)
+  async function provarPosse(c) {
+    const desafio = randomBytes(32);
+    let sig;
+    try { sig = await P.certSistema.assinar(c.id, desafio, 'sha256'); }
+    catch (e) { falha(`O sistema não permitiu usar a chave do certificado: ${e.message}`); }
+    if (!conferirAssinatura(c.info.certPem, desafio, sig)) falha('A assinatura feita com o certificado não confere.');
+  }
+  function guardarCertSistema(uid, c, apelido) {
+    const ex = db.prepare('SELECT id FROM certificados WHERE usuario_id = ? AND serial = ?').get(uid, c.info.serial);
+    if (ex) { db.prepare("UPDATE certificados SET origem = 'sistema', ref_sistema = ?, cert_pem = ? WHERE id = ? AND origem = 'sistema'").run(c.id, c.info.certPem, ex.id); return ex.id; }
+    return db.prepare(`INSERT INTO certificados (usuario_id, apelido, titular, documento, tipo_doc, emissor, serial, valido_de, valido_ate, pfx_enc, senha_enc, cadeia, origem, ref_sistema, cert_pem)
+      VALUES (?,?,?,?,?,?,?,?,?,'','',?,'sistema',?,?)`).run(uid, apelido || c.titular, c.titular, c.documento, c.tipo_doc, c.emissor, c.info.serial, c.info.valido_de, c.info.valido_ate,
+      JSON.stringify({ completa: true, sistema: true, aviso: 'Cadeia gerenciada pelo sistema operacional' }), c.id, c.info.certPem).lastInsertRowid;
+  }
+  GET('/api/certificados/sistema', async () => {
+    if (!P.certSistema) return { suportado: false };
+    if (P.certSistema.escolhaNativa) return { suportado: true, escolhaNativa: true, certificados: [] };
+    try {
+      return { suportado: true, certificados: (await certificadosSistema()).map(({ info, ...c }) => c) };
+    } catch (e) { return { suportado: false, erro: `Não foi possível ler os certificados instalados: ${e.message}` }; }
+  }, true);
+  POST('/api/auth/certificado-sistema', async ({ body }) => {
+    const c = await certSistemaPorId(body.id);
+    await provarPosse(c);
+    let u = db.prepare('SELECT * FROM usuarios WHERE documento = ?').get(c.documento)
+      || db.prepare('SELECT u.* FROM usuarios u JOIN certificados c ON c.usuario_id = u.id WHERE c.documento = ? LIMIT 1').get(c.documento);
+    if (!u) u = { id: db.prepare('INSERT INTO usuarios (nome, documento) VALUES (?,?)').run(c.titular, c.documento).lastInsertRowid, nome: c.titular };
+    guardarCertSistema(u.id, c);
+    audit(u.id, 'login', `certificado instalado ${c.documento}`);
+    return { token: criarSessao(u.id, 'certificado'), usuario: { nome: u.nome, documento: c.documento } };
+  }, true);
+  POST('/api/certificados/sistema', async ({ user, body }) => {
+    const c = await certSistemaPorId(body.id);
+    await provarPosse(c);
+    const id = guardarCertSistema(user.id, c, body.apelido);
+    audit(user.id, 'certificado.add', `sistema ${c.titular} ${c.documento}`);
     return resumoCert(db.prepare('SELECT * FROM certificados WHERE id = ?').get(id));
   });
   DEL('/api/certificados/:id', ({ user, params }) => { db.prepare('DELETE FROM certificados WHERE id = ? AND usuario_id = ?').run(params.id, user.id); audit(user.id, 'certificado.del', params.id); return { ok: true }; });
@@ -338,14 +426,111 @@ export function criarApi(P) {
     if (!r || r.status !== 200) return null;
     try { return JSON.parse(new TextDecoder().decode(r.body)); } catch { return null; }
   }
-  GET('/api/consulta/cnpj/:cnpj', async ({ params }) => {
-    const d = await obterJson(`https://brasilapi.com.br/api/cnpj/v1/${so(params.cnpj)}`);
-    if (!d || !d.cnpj) falha('Não foi possível consultar o CNPJ agora.');
-    return {
-      documento: so(d.cnpj), nome: d.razao_social, nome_fantasia: d.nome_fantasia, cep: so(d.cep), logradouro: [d.descricao_tipo_de_logradouro, d.logradouro].filter(Boolean).join(' '),
-      numero: d.numero, complemento: d.complemento, bairro: d.bairro, uf: d.uf, cod_municipio: String(d.codigo_municipio_ibge || ''), email: d.email, fone: d.ddd_telefone_1,
-      simples: d.opcao_pelo_simples, mei: d.opcao_pelo_mei,
-    };
+  // ---- Cadastro da Receita Federal (CNPJ): BrasilAPI → Minha Receita, completando campos vazios pelo CNPJ.ws
+  const limpo = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  function normalizarReceita(d, fonte) {
+    if (!d) return null;
+    if (d.estabelecimento) { // CNPJ.ws
+      const e = d.estabelecimento;
+      return { fonte, documento: so(e.cnpj), nome: d.razao_social, nome_fantasia: e.nome_fantasia, cep: so(e.cep), tipo_logradouro: e.tipo_logradouro, logradouro: e.logradouro, numero: e.numero, complemento: e.complemento,
+        bairro: e.bairro, uf: e.estado?.sigla, cod_municipio: String(e.cidade?.ibge_id || ''), municipio: e.cidade?.nome, email: e.email, fone: so(`${e.ddd1 || ''}${e.telefone1 || ''}`),
+        situacao: e.situacao_cadastral, simples: d.simples?.simples === 'Sim', mei: d.simples?.mei === 'Sim', cnae: e.atividade_principal?.descricao };
+    }
+    if (!d.cnpj) return null; // BrasilAPI / Minha Receita
+    return { fonte, documento: so(d.cnpj), nome: d.razao_social, nome_fantasia: d.nome_fantasia, cep: so(d.cep), tipo_logradouro: d.descricao_tipo_de_logradouro, logradouro: d.logradouro, numero: d.numero,
+      complemento: d.complemento, bairro: d.bairro, uf: d.uf, cod_municipio: String(d.codigo_municipio_ibge || ''), municipio: d.municipio, email: d.email, fone: so(d.ddd_telefone_1),
+      situacao: d.descricao_situacao_cadastral, simples: !!d.opcao_pelo_simples, mei: !!d.opcao_pelo_mei, cnae: d.cnae_fiscal_descricao };
+  }
+  async function consultarCnpj(cnpj, { completar = true } = {}) {
+    const doc = so(cnpj);
+    if (!docValido('CNPJ', doc)) falha('CNPJ inválido.');
+    let r = normalizarReceita(await obterJson(`https://brasilapi.com.br/api/cnpj/v1/${doc}`), 'BrasilAPI')
+      || normalizarReceita(await obterJson(`https://minhareceita.org/${doc}`), 'Minha Receita');
+    const faltando = x => !x || !x.email || !x.fone || !x.logradouro;
+    if (completar && faltando(r)) {
+      const w = normalizarReceita(await obterJson(`https://publica.cnpj.ws/cnpj/${doc}`), 'CNPJ.ws');
+      if (w) r = r ? Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v === null || v === undefined || v === '' ? w[k] : v])) : w;
+    }
+    if (!r) falha('Não foi possível consultar o CNPJ na Receita agora (serviços públicos indisponíveis). Tente novamente em instantes.', 502);
+    // Endereço completo: tipo + logradouro sem repetir o número que algumas bases trazem colado ("PAULISTA 37")
+    let lg = limpo(r.logradouro);
+    if (r.numero && lg.endsWith(' ' + limpo(r.numero))) lg = lg.slice(0, -limpo(r.numero).length - 1);
+    const tipo = limpo(r.tipo_logradouro);
+    const logradouro = tipo && !lg.toUpperCase().startsWith(tipo.toUpperCase()) ? `${tipo} ${lg}` : lg;
+    const mun = MUN.get(so(r.cod_municipio));
+    return { ...r, logradouro, numero: limpo(r.numero) || 'S/N', complemento: limpo(r.complemento), bairro: limpo(r.bairro), email: limpo(r.email).toLowerCase(),
+      municipio: mun?.nome || limpo(r.municipio), uf: r.uf || mun?.uf || '', ativa: !r.situacao || /ativa/i.test(r.situacao) };
+  }
+
+  // ---- Inscrição municipal: o CNC (cadastro nacional de contribuintes) só é acessível pelos municípios. A IM é obtida
+  // das próprias NFS-e (a Sefin grava a IM do CNC no grupo emit) e dos cadastros locais, e aprendida a cada nota.
+  const papeis = ['emit', 'DPS/infDPS/prest', 'DPS/infDPS/toma', 'DPS/infDPS/interm'];
+  function inscricaoMunicipal(uid, documento) {
+    const doc = so(documento);
+    if (!doc) return null;
+    const loc = db.prepare("SELECT im, 'empresa emitente' AS f FROM contribuintes WHERE usuario_id = ? AND documento = ? AND COALESCE(im,'') <> '' UNION ALL SELECT im, 'cadastro de clientes' FROM tomadores WHERE usuario_id = ? AND documento = ? AND COALESCE(im,'') <> '' LIMIT 1").get(uid, doc, uid, doc);
+    if (loc) return { im: loc.im, fonte: loc.f };
+    const rows = db.prepare(`SELECT nnfse, competencia, xml_nfse, xml_dps FROM notas WHERE usuario_id = ? AND (xml_nfse LIKE ? OR xml_dps LIKE ?) ORDER BY id DESC LIMIT 30`).all(uid, `%>${doc}<%`, `%>${doc}<%`);
+    for (const n of rows) {
+      try {
+        const x = parseXml(n.xml_nfse || n.xml_dps);
+        const inf = busca(x, 'infNFSe') || busca(x, 'DPS');
+        for (const p of papeis) {
+          const el = p === 'emit' ? no(inf, 'emit') : (busca(x, p.split('/').pop()));
+          if (el && so(txt(el, 'CNPJ') || txt(el, 'CPF')) === doc && txt(el, 'IM')) return { im: txt(el, 'IM'), fonte: `NFS-e${n.nnfse ? ' nº ' + n.nnfse : ''} de ${String(n.competencia || '').slice(0, 7)}` };
+        }
+      } catch { /* XML ilegível */ }
+    }
+    return null;
+  }
+  /** Aprende a IM (e completa cadastros sem IM) a partir de uma NFS-e autorizada ou importada. */
+  function aprenderIM(uid, xml) {
+    try {
+      const x = parseXml(xml);
+      const emit = no(busca(x, 'infNFSe'), 'emit');
+      const pares = [[emit, 'contribuintes'], [busca(x, 'prest'), 'contribuintes'], [busca(x, 'toma'), 'tomadores'], [busca(x, 'interm'), 'tomadores']];
+      for (const [el, tab] of pares) {
+        const doc = so(txt(el, 'CNPJ') || txt(el, 'CPF')), im = so(txt(el, 'IM'));
+        if (doc && im) db.prepare(`UPDATE ${tab} SET im = ? WHERE usuario_id = ? AND documento = ? AND COALESCE(im,'') = ''`).run(im, uid, doc);
+      }
+    } catch { /* ignora */ }
+  }
+
+  GET('/api/consulta/cnpj/:cnpj', async ({ user, params }) => {
+    const r = await consultarCnpj(params.cnpj);
+    const im = inscricaoMunicipal(user.id, r.documento);
+    return { ...r, im: im?.im || '', im_fonte: im?.fonte || '',
+      im_aviso: im ? '' : 'Inscrição municipal não localizada: ela não consta do cadastro da Receita e o cadastro nacional (CNC) só é aberto às prefeituras. Informe-a manualmente; após a primeira NFS-e autorizada ou importada do ADN o sistema a preenche sozinho.' };
+  });
+  // Completa em lote os cadastros (empresas ou clientes) com CNPJ: só preenche campos vazios, nunca sobrescreve
+  POST('/api/cadastros/completar', async ({ user, body }) => {
+    const tab = body.tipo === 'contribuintes' ? 'contribuintes' : 'tomadores';
+    const nomeCol = tab === 'contribuintes' ? 'razao_social' : 'nome';
+    const ids = (body.ids || []).map(Number).filter(Boolean);
+    let rows = db.prepare(`SELECT * FROM ${tab} WHERE usuario_id = ? AND tipo_doc = 'CNPJ'`).all(user.id);
+    if (ids.length) rows = rows.filter(r => ids.includes(r.id));
+    const campos = ['cep', 'logradouro', 'numero', 'complemento', 'bairro', 'cod_municipio', 'uf', 'email', 'fone', ...(tab === 'contribuintes' ? ['nome_fantasia'] : [])];
+    const res = { total: rows.length, atualizados: 0, ims: 0, erros: [], itens: [] };
+    for (const r of rows.slice(0, 200)) {
+      const alt = {};
+      let im = null;
+      try {
+        if (campos.some(k => !r[k])) {
+          const d = await consultarCnpj(r.documento, { completar: rows.length <= 3 });
+          for (const k of campos) if (!r[k] && d[k]) alt[k] = ['cep', 'fone', 'cod_municipio'].includes(k) ? so(d[k]) : d[k];
+          if (!r[nomeCol] && d.nome) alt[nomeCol] = d.nome;
+        }
+        if (!r.im) { im = inscricaoMunicipal(user.id, r.documento); if (im) alt.im = so(im.im); }
+        const ks = Object.keys(alt).filter(k => tab === 'contribuintes' ? CAMPOS_CONTRIB.includes(k) : CAMPOS_TOMA.includes(k));
+        if (ks.length) {
+          db.prepare(`UPDATE ${tab} SET ${ks.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...ks.map(k => alt[k]), r.id);
+          res.atualizados++; if (alt.im) res.ims++;
+        }
+        res.itens.push({ id: r.id, nome: r[nomeCol], campos: ks, im_fonte: im?.fonte || '' });
+      } catch (e) { res.erros.push({ id: r.id, nome: r[nomeCol], erro: e.message }); }
+    }
+    audit(user.id, 'cadastros.completar', `${tab}: ${res.atualizados}/${res.total}`);
+    return res;
   });
   GET('/api/consulta/cep/:cep', async ({ params }) => {
     const d = await obterJson(`https://viacep.com.br/ws/${so(params.cep)}/json/`);
@@ -438,7 +623,7 @@ export function criarApi(P) {
     }
     const subst = body.substituir ? { chave: body.substituir.chave, motivo: body.substituir.motivo, xMotivo: body.substituir.xMotivo } : null;
     const { xml, id, dhEmi, tpAmb } = montarDPS({ contrib: c, tomador: t, form: f, calc, serie: c.serie_dps, nDPS, ambiente: c.ambiente, subst });
-    const xmlAssinado = cred.cert ? assinar(xml, 'infDPS', cred.cert, json(c.config).assinatura) : xml;
+    const xmlAssinado = cred.cert ? await assinarXml(xml, 'infDPS', cred.cert, json(c.config).assinatura) : xml;
 
     let status, chave = null, nNFSe = null, xmlNFSe = null, resposta = null, mensagens = [], dhProc = null;
     if (avisosSeq.length) mensagens.push({ codigo: 'SEQ', descricao: `Número(s) de DPS ${avisosSeq.join(', ')} já utilizado(s) na Sefin (série ${c.serie_dps}); a DPS foi emitida com o nº ${nDPS}.` });
@@ -487,6 +672,7 @@ export function criarApi(P) {
       db.prepare(`UPDATE notas SET ${ks.map(k => `${k} = ?`).join(',')}, atualizado_em = datetime('now') WHERE id = ? AND usuario_id = ?`).run(...ks.map(k => vals[k]), notaId, uid);
     } else notaId = db.prepare(`INSERT INTO notas (${ks.join(',')}) VALUES (${ks.map(() => '?').join(',')})`).run(...ks.map(k => vals[k])).lastInsertRowid;
     if (status === 'autorizada' && subst?.chave) db.prepare("UPDATE notas SET status = 'substituida' WHERE chave_acesso = ? AND usuario_id = ?").run(subst.chave, uid);
+    if (status === 'autorizada' && xmlNFSe && c.ambiente !== 'simulacao') aprenderIM(uid, xmlNFSe);
     audit(uid, 'nota.emitir', `${status} ${chave || id} via ${cred.via}`);
     const out = { id: notaId, status, chave, nNFSe, mensagens, idDps: id, tpAmb };
     if (status === 'rejeitada') return { __status: 422, ...out, erro: 'NFS-e rejeitada pela Sefin Nacional.', erros: mensagens };
@@ -612,6 +798,7 @@ export function criarApi(P) {
     const nNFSe = (r.xml.match(/<nNFSe>(\d+)<\/nNFSe>/) || [])[1] || null;
     db.prepare("UPDATE notas SET chave_acesso = ?, xml_nfse = ?, status = ?, nnfse = COALESCE(?, nnfse), dh_proc = COALESCE(dh_proc, ?), atualizado_em = datetime('now') WHERE id = ?")
       .run(chave, r.xml, sit.status, nNFSe, (r.xml.match(/<dhProc>([^<]+)<\/dhProc>/) || [])[1] || null, n.id);
+    aprenderIM(user.id, r.xml);
     return { ok: true, status: sit.status };
   });
   POST('/api/notas/:id/cancelar', async ({ user, params, body }) => {
@@ -626,7 +813,7 @@ export function criarApi(P) {
     if (n.ambiente === 'simulacao') { ok = true; resposta = { simulacao: true }; }
     else {
       const cred = await credencial(uid, c, body.procuracao_id || n.procuracao_id, 'cancelamento');
-      xmlAss = assinar(xml, 'infPedReg', cred.cert, json(c.config).assinatura);
+      xmlAss = await assinarXml(xml, 'infPedReg', cred.cert, json(c.config).assinatura);
       const r = await sefin.registrarEvento(n.ambiente, cred.cert, n.chave_acesso, xmlAss);
       ok = r.ok; resposta = r.ok ? r.bruto : { erros: r.erros };
     }
@@ -794,6 +981,7 @@ export function criarApi(P) {
               res.importadas++;
             }
             if (x.chSubstda) db.prepare("UPDATE notas SET status = 'substituida' WHERE usuario_id = ? AND chave_acesso = ?").run(user.id, x.chSubstda);
+            aprenderIM(user.id, d.xml);
             // Mantém a numeração à frente do maior nº de DPS encontrado nesta série
             if (x.serie && +x.serie === +c.serie_dps && +x.nDPS >= contribuinte(user.id, c.id).prox_ndps) db.prepare('UPDATE contribuintes SET prox_ndps = ? WHERE id = ?').run(+x.nDPS + 1, c.id);
           } else if (/e101101|e105102/.test(d.xml)) {
@@ -815,6 +1003,7 @@ export function criarApi(P) {
   POST('/api/certificados/:id/cadeia', async ({ user, params }) => {
     const row = db.prepare('SELECT * FROM certificados WHERE id = ? AND usuario_id = ?').get(params.id, user.id);
     if (!row) falha('Certificado não encontrado.');
+    if (row.origem === 'sistema') falha('A cadeia de certificados instalados é gerenciada pelo sistema operacional.');
     const pfx = await P.cofre.decrypt(row.pfx_enc, true), senha = await P.cofre.decrypt(row.senha_enc);
     const prep = await prepararPfx(pfx, senha, lerPfx(pfx, senha));
     db.prepare('UPDATE certificados SET pfx_enc = ?, cadeia = ? WHERE id = ?').run(await P.cofre.encrypt(prep.bytes), JSON.stringify(prep.cadeia), row.id);

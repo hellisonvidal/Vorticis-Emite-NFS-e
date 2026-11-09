@@ -19,7 +19,11 @@ export const AMBIENTES = {
 };
 export const URL_CONSULTA_PUBLICA = 'https://www.nfse.gov.br/ConsultaPublica/?tpc=1&chave=';
 
-export const gzipB64 = xml => b64(gzipSync(utf8(xml)));
+// A Sefin exige o XML em UTF-8 com a declaração explícita; sem ela rejeita com E1229
+// ("Xml não está utilizando codificação UTF-8"). Remove BOM e declarações em outra codificação.
+export const DECLARACAO_XML = '<?xml version="1.0" encoding="UTF-8"?>';
+export const comDeclaracao = xml => DECLARACAO_XML + String(xml).replace(/^\uFEFF/, '').replace(/^\s*<\?xml[^>]*\?>\s*/, '');
+export const gzipB64 = xml => b64(gzipSync(utf8(comDeclaracao(xml))));
 
 /**
  * Decodifica o conteúdo XML recebido das APIs, tolerando as variações observadas:
@@ -40,7 +44,7 @@ export function decodificarXml(valor) {
 export function criarSefin(http) {
   async function req(url, { method = 'GET', body, cert, accept = 'application/json' }) {
     const r = await http({
-      url, method, pfx: cert?.pfx, senha: cert?.senha,
+      url, method, pfx: cert?.pfx, senha: cert?.senha, certSistema: cert?.sistema,
       headers: { Accept: accept, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });

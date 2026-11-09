@@ -104,7 +104,8 @@ export const confirmar = (titulo, texto, ok = 'Confirmar', cls = 'primary') => m
 export function lerForm(el) {
   const o = {};
   $$('[name]', el).forEach(i => {
-    if (i.type === 'checkbox') o[i.name] = i.checked;
+    if (i.dataset.mask === 'moeda') o[i.name] = lerNumero(i.value);
+    else if (i.type === 'checkbox') o[i.name] = i.checked;
     else if (i.type === 'radio') { if (i.checked) o[i.name] = i.value; }
     else if (i.type === 'number') o[i.name] = i.value === '' ? '' : +i.value;
     else o[i.name] = i.value;
@@ -118,44 +119,127 @@ export function preencherForm(el, o) {
     if (i.type === 'checkbox') i.checked = !!v && v !== '0';
     else if (i.type === 'radio') i.checked = String(v) === i.value;
     else i.value = v ?? '';
+    if (i.dataset.mask) aplicarMascara(i);
   });
 }
 export const campo = (label, input, { req, hint, cls = '' } = {}) =>
   `<label class="f ${cls}"><span>${label}${req ? ' <i class="req">*</i>' : ''}</span>${input}${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
 export const opts = (obj, sel) => Object.entries(obj).map(([k, v]) => `<option value="${esc(k)}" ${String(sel) === String(k) ? 'selected' : ''}>${esc(v)}</option>`).join('');
 
-// Máscara de documento/CEP enquanto digita
-export function mascaras(root) {
-  root.addEventListener('input', e => {
-    const i = e.target;
-    if (i.dataset.mask === 'doc') {
-      const d = so(i.value).slice(0, 14);
-      i.value = d.length <= 11 ? d.replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d{1,2})$/, '$1-$2')
-        : d.replace(/^(\d{2})(\d)/, '$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3').replace(/\.(\d{3})(\d)/, '.$1/$2').replace(/(\d{4})(\d)/, '$1-$2');
-    } else if (i.dataset.mask === 'cep') i.value = so(i.value).slice(0, 8).replace(/(\d{5})(\d)/, '$1-$2');
-  });
+// ---------- Máscaras (CPF/CNPJ, CEP, telefone, valores em R$ e %) ----------
+// Formatação no próprio campo; os valores são normalizados na leitura (lerForm / so()) e no servidor.
+//   data-mask="doc"   CPF ou CNPJ conforme a quantidade de dígitos (não aplica quando o tipo do documento é NIF)
+//   data-mask="cep" | "fone"
+//   data-mask="moeda" R$ 1.234,56 (digitação estilo caixa: os dígitos entram pelos centavos);
+//                     com data-mask-tipo="<select>" vira percentual quando o seletor não está em R$
+/** Converte "R$ 1.234,56", "1.234,56", "1234.56" ou número em Number ('' quando vazio). */
+export function lerNumero(v) {
+  if (typeof v === 'number') return v;
+  const t = String(v ?? '').replace(/[^\d,.-]/g, '');
+  if (!t) return '';
+  const n = t.includes(',') ? Number(t.replace(/\./g, '').replace(',', '.')) : Number(t);
+  return Number.isFinite(n) ? n : '';
+}
+const fmtDocMask = d => (d.length <= 11
+  ? d.replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d{1,2})$/, '$1-$2')
+  : d.replace(/^(\d{2})(\d)/, '$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3').replace(/\.(\d{3})(\d)/, '.$1/$2').replace(/(\d{4})(\d)/, '$1-$2'));
+const fmtFone = d => (d.length <= 10 ? d.replace(/^(\d{2})(\d)/, '($1) $2').replace(/(\d{4})(\d{1,4})$/, '$1-$2') : d.replace(/^(\d{2})(\d)/, '($1) $2').replace(/(\d{5})(\d{1,4})$/, '$1-$2'));
+function seletorTipo(i) {
+  const f = i.form || i.closest('form') || document;
+  if (i.dataset.maskTipo) return f.querySelector(`[name="${i.dataset.maskTipo}"]`);
+  if (i.dataset.mask === 'doc') return f.querySelector(`[name="${i.name.replace(/documento$/, 'tipo_doc')}"]`);
+  return null;
+}
+const ehPercentual = i => { const s = seletorTipo(i); return !!s && !['', 'v', 'valor', 'R$'].includes(s.value); };
+/** Formata o valor atual do campo conforme a máscara (também usado após preenchimento programático). */
+export function aplicarMascara(i, { digitando = false } = {}) {
+  const m = i.dataset.mask, v = i.value;
+  if (!m || v == null) return;
+  if (m === 'doc') {
+    const tipo = seletorTipo(i)?.value;
+    if (tipo && !['CNPJ', 'CPF'].includes(tipo)) return;
+    const d = so(v).slice(0, 14);
+    i.value = d ? fmtDocMask(d) : '';
+  } else if (m === 'cep') i.value = so(v).slice(0, 8).replace(/(\d{5})(\d)/, '$1-$2');
+  else if (m === 'fone') { const d = so(v).slice(0, 11); i.value = d ? fmtFone(d) : ''; }
+  else if (m === 'moeda') {
+    const pctMode = ehPercentual(i);
+    let n;
+    if (digitando) { const d = so(v).replace(/^0+(?=\d)/, '').slice(0, 15); n = d ? Number(d) / 100 : ''; }
+    else n = lerNumero(v);
+    i.value = n === '' ? '' : `${pctMode ? '' : 'R$ '}${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${pctMode ? ' %' : ''}`;
+  }
+}
+let mascarasAtivas = false;
+/** Ativa as máscaras para todo o documento (uma vez) e formata os campos já existentes em `root`. */
+export function mascaras(root = document) {
+  if (!mascarasAtivas) {
+    mascarasAtivas = true;
+    document.addEventListener('input', e => {
+      const i = e.target;
+      if (!i.dataset?.mask) return;
+      const fim = i.selectionStart === i.value.length;
+      aplicarMascara(i, { digitando: true });
+      if (fim) i.setSelectionRange?.(i.value.length, i.value.length);
+    }, true);
+    document.addEventListener('change', e => {
+      const t = e.target;
+      if (t.dataset?.mask) aplicarMascara(t);
+      // trocar o tipo (CPF/CNPJ/NIF ou R$/%) reformata os campos dependentes
+      if (t.tagName === 'SELECT' && t.name) (t.form || document).querySelectorAll('[data-mask]').forEach(i => { if (seletorTipo(i) === t) aplicarMascara(i); });
+    }, true);
+    document.addEventListener('focusout', e => { if (e.target.dataset?.mask) aplicarMascara(e.target); }, true);
+    // Campos inseridos depois (modais, páginas): formata o valor inicial
+    new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) (n.matches?.('[data-mask]') ? [n] : n.querySelectorAll?.('[data-mask]') || []).forEach(i => aplicarMascara(i)); })
+      .observe(document.documentElement, { childList: true, subtree: true });
+  }
+  root.querySelectorAll?.('[data-mask]').forEach(i => aplicarMascara(i));
 }
 
 // ---------- Autocomplete genérico ----------
-export function autocomplete(input, { buscar, render, escolher, min = 2 }) {
+// Com `seta: true` vira uma caixa de combinação: além de digitar, a seta (ou Alt+↓) lista todas as opções.
+// `rodape(q)` pode devolver ações extras ({ html, acao }) exibidas ao fim da lista.
+export function autocomplete(input, { buscar, render, escolher, min = 2, seta = false, vazio = 'Nenhuma opção encontrada.', rodape }) {
   const wrap = input.parentElement;
   wrap.classList.add('ac');
-  let list, timer, itens = [], sel = -1;
-  const fechar = () => { list?.remove(); list = null; sel = -1; };
-  const abrir = async () => {
-    const q = input.value.trim();
-    if (q.length < min) return fechar();
-    itens = await buscar(q);
+  let list, timer, itens = [], sel = -1, acoes = [], ancora = wrap;
+  const fechar = () => { list?.remove(); list = null; sel = -1; wrap.classList.remove('ac-aberto'); };
+  const abrir = async (todos = false) => {
+    const q = todos ? '' : input.value.trim();
+    if (!todos && q.length < min) return fechar();
+    itens = await buscar(q, { todos });
+    acoes = rodape ? (rodape(q) || []) : [];
     fechar();
-    if (!itens.length) return;
+    if (!itens.length && !todos && !acoes.length) return;
     list = document.createElement('div');
     list.className = 'ac-list';
-    list.innerHTML = itens.map((it, i) => `<div data-i="${i}">${render(it)}</div>`).join('');
-    list.onmousedown = e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); escolher(itens[+d.dataset.i]); fechar(); } };
-    wrap.append(list);
+    list.innerHTML = (itens.length ? itens.map((it, i) => `<div data-i="${i}">${render(it)}</div>`).join('') : `<div class="ac-vazio">${vazio}</div>`)
+      + acoes.map((a, i) => `<div class="ac-acao" data-a="${i}">${a.html}</div>`).join('');
+    list.onmousedown = e => {
+      const d = e.target.closest('[data-i]'), a = e.target.closest('[data-a]');
+      if (d) { e.preventDefault(); escolher(itens[+d.dataset.i]); fechar(); }
+      else if (a) { e.preventDefault(); fechar(); acoes[+a.dataset.a].acao(); }
+      else e.preventDefault();
+    };
+    ancora.append(list);
+    wrap.classList.add('ac-aberto');
   };
+  if (seta) {
+    wrap.classList.add('ac-combo');
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'ac-seta'; b.tabIndex = -1; b.title = 'Ver opções';
+    b.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+    b.onmousedown = e => { e.preventDefault(); if (list) fechar(); else { input.focus(); abrir(true); } };
+    // a seta fica dentro do campo: envolve o input numa caixa posicionada
+    const caixa = document.createElement('span');
+    caixa.className = 'ac-caixa';
+    input.before(caixa);
+    caixa.append(input, b);
+    ancora = caixa;
+    input.addEventListener('keydown', e => { if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); abrir(true); } });
+  }
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(abrir, 220); });
-  input.addEventListener('focus', () => { if (input.value.trim().length >= min) abrir(); });
+  input.addEventListener('focus', () => { if (min > 0 && input.value.trim().length >= min) abrir(); });
   input.addEventListener('blur', () => setTimeout(fechar, 150));
   input.addEventListener('keydown', e => {
     if (!list) return;

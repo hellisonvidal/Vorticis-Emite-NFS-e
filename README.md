@@ -13,8 +13,9 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
 ## Funcionalidades
 
 - **Acesso:**
-  - login com usuário e senha, ou com certificado digital A1 (`.pfx`);
-  - certificados guardados com criptografia AES-256-GCM;
+  - login com usuário e senha (a conta é criada na própria aba "Usuário e senha"), ou com certificado digital;
+  - **certificados já instalados no computador ou no celular**: repositório pessoal do Windows (inclusive chaves não exportáveis e token/cartão A3, com o PIN pedido pelo Windows) e certificados instalados no Android (KeyChain). A chave privada não sai do sistema: a assinatura da DPS e a conexão segura com a Sefin são feitas pelo próprio Windows/Android;
+  - ou o arquivo A1 (`.pfx`), guardado com criptografia AES-256-GCM;
   - várias **procurações eletrônicas** por empresa, cada uma com vigência e escopo; na emissão você escolhe qual certificado ou procuração usar.
 - **Regimes:** MEI, Simples Nacional ME/EPP (incluindo sublimite excedido), Lucro Presumido, Real e Arbitrado, Imune e Isenta, além de regimes especiais de ISS.
 - **Tributos:**
@@ -32,6 +33,10 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
   - rascunhos, serviços favoritos e consulta de CNPJ e CEP;
   - grupos de obra, evento, comércio exterior e substituição.
 - **Copiar a última nota:** por empresa ou por tomador. Depois é só trocar o tomador e os valores e emitir.
+- **Campos formatados:** CPF/CNPJ, CEP e telefone já formatados (inclusive ao colar ou ao preencher por consulta), valores em R$ (ou % quando a retenção/dedução é percentual) e datas no padrão dd/mm/aaaa.
+- **Códigos de tributação:** cTribNac e cTribMun aceitam digitação com busca e têm uma seta para ver todas as opções. As opções de cTribMun vêm da tabela do município (inclusive consultada na Sefin), dos serviços favoritos e das notas anteriores.
+- **Cadastro pela Receita:** a consulta de CNPJ preenche o endereço completo, o município/UF, o telefone e o e-mail, usando BrasilAPI, Minha Receita e CNPJ.ws como alternativas. "Completar pela Receita" faz o mesmo em lote para empresas e clientes, só nos campos vazios.
+- **Inscrição municipal:** não consta do cadastro da Receita, e o cadastro nacional (CNC) só é aberto às prefeituras. O app busca a IM nas NFS-e já emitidas ou importadas do ADN, em que a Sefin grava a IM do CNC, e preenche o cadastro automaticamente a cada nota autorizada ou importada.
 - **Consultas:** tabelas oficiais da Lista Nacional (cTribNac), NBS 2.0, correlação Item × NBS × IBS/CBS, cClassTrib, cIndOp, municípios IBGE e códigos municipais.
 - **Notas:**
   - XML da DPS e da NFS-e;
@@ -102,13 +107,15 @@ core/        núcleo compartilhado (roda no Node e no WebView do Android)
   seguranca.js PBKDF2 / AES-GCM via WebCrypto
   data/        tabelas oficiais convertidas (gov.br/nfse)
 server/      servidor HTTP local (Express) usado no Windows e no navegador
-desktop/     processo principal do Electron (janela, menu, downloads)
+desktop/     processo principal do Electron (janela, menu, downloads, PDF, confirmação ao fechar)
+  repositorio-windows.js   certificados do Windows via PowerShell/.NET (listar e assinar)
+  certificados-windows.js  TLS com certificado do Windows pela pilha de rede do Chromium
 mobile/      app Android (Capacitor)
   src/main.js  inicialização: sql.js + IndexedDB + ponte nativa
   build.js     empacota o frontend e o núcleo em mobile/www
   android/     projeto Android; plugin nativo VorticisNativoPlugin.java (mTLS, salvar, compartilhar, imprimir, PDF)
 public/      interface (JS puro, sem build) + Chart.js
-scripts/     importar_tabelas.py, gerar-icones.cjs, demo.js
+scripts/     importar_tabelas.py, gerar-icone-vorticis.py (ícone da família Vorticis), gerar-icones.cjs, demo.js
 docs-oficiais/ XSDs v1.01 e planilhas oficiais
 ```
 
@@ -143,7 +150,8 @@ base64 -w0 vorticis.jks
 - **Procuração:** precisa estar registrada oficialmente (Procuração Eletrônica com o serviço NFS-e). O app só associa o certificado do procurador à empresa.
 - **Antes de usar em produção**, valide em **Produção restrita** com o seu certificado real (use *Empresas → Diagnóstico*). Se a Sefin rejeitar a assinatura (erro E0714), troque o algoritmo para SHA-256 no cadastro da empresa.
 - **Numeração:** se usar o app em mais de um aparelho, use uma **série diferente em cada um**. O Emissor Web da Receita usa as séries 70000–79999, então não há conflito com ele.
-- **Certificado A3** (token ou cartão) não é suportado. A emissão por API exige certificado A1.
+- **Certificado A3** (token ou cartão): funciona no Windows quando o certificado aparece no repositório pessoal (driver do token instalado). O Windows pede o PIN ao assinar. No Android, use certificado A1 instalado ou o arquivo `.pfx`.
+- **Envio à Sefin em UTF-8:** a DPS e os eventos são enviados com a declaração `<?xml version="1.0" encoding="UTF-8"?>`, o que corrige a rejeição E1229.
 - **Alíquotas de IBS/CBS a partir de 2027** e as reduções por cClassTrib são **valores de referência**. Confira antes de emitir.
 - **No Android, os dados ficam só no aparelho.** Faça backups regulares em *Configurações → Backup do banco de dados*.
 - **Atualização das tabelas oficiais:** baixe os novos anexos de https://www.gov.br/nfse/pt-br/biblioteca/documentacao-tecnica para `docs-oficiais/` e rode `npm run tabelas`.

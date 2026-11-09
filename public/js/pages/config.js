@@ -39,7 +39,7 @@ export async function paginaConfig(view) {
       <label class="f"><span>Consumer Key</span><input name="consumerKey" autocomplete="off"></label>
       <label class="f"><span>Consumer Secret</span><input name="consumerSecret" type="password" autocomplete="new-password" placeholder="(mantido)"></label>
       <label class="f"><span>Certificado do contratante (e-CNPJ)</span><select name="certificado_id"><option value="">Selecione…</option></select></label>
-      <label class="f"><span>CNPJ do contratante</span><input name="contratante" placeholder="se diferente do certificado"></label>
+      <label class="f"><span>CNPJ do contratante</span><input name="contratante" data-mask="doc" inputmode="numeric" placeholder="se diferente do certificado"></label>
       <div class="btns"><button class="btn primary">${icon('save')}Salvar</button></div>
     </form></div>
   <div class="card"><div class="card-head"><h2>Serviços favoritos</h2><span class="muted small">Adicione pela “Consulta de códigos” → Usar</span></div>

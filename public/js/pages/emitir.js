@@ -1,4 +1,5 @@
 import { get, post, cached, ErroApi } from '../api.js';
+import { preencherPelaReceita } from '../receita.js';
 import { $, $$, esc, icon, moeda, pct, num, toast, modal, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, fmtCTrib, fmtNBS, fmtChave, hoje, formatarXml, AMB, badge, dataBR } from '../ui.js';
 import { estado } from '../estado.js';
 
@@ -13,7 +14,7 @@ export async function paginaEmitir(view, params) {
   const c = estado.contrib();
   if (!c) { view.innerHTML = `<div class="alert warn">${icon('alert')}<div>Cadastre uma empresa emitente antes de emitir. <a href="#/empresas?novo=1">Cadastrar agora</a></div></div>`; return; }
   const meta = await cached('/api/tabelas/meta');
-  const [servicos, codMun] = await Promise.all([get('/api/servicos'), get(`/api/codigos-municipais?municipio=${c.cod_municipio}`)]);
+  const servicos = await get('/api/servicos');
   let tomadorId = null, rascunhoId = null, sugestoesCache = [];
 
   const procs = c.procuracoes.filter(p => p.ativo);
@@ -50,11 +51,11 @@ export async function paginaEmitir(view, params) {
         </div>
         <div class="grid g4">
           ${campo('Tipo', `<select name="t_tipo_doc">${opts(TP_DOC, 'CNPJ')}</select>`)}
-          ${campo('CPF/CNPJ/NIF', `<div class="input-group"><input name="t_documento" data-mask="doc"><button type="button" class="btn sm" id="btnCnpj" title="Consultar CNPJ">${icon('search')}</button></div>`)}
+          ${campo('CPF/CNPJ/NIF', `<div class="input-group"><input name="t_documento" data-mask="doc" inputmode="numeric" style="min-width:170px"><button type="button" class="btn sm" id="btnCnpj" title="Consultar CNPJ">${icon('search')}</button></div>`)}
           ${campo('Nome / Razão social', '<input name="t_nome">', { cls: 'span2', req: true })}
           ${campo('Inscrição municipal', '<input name="t_im">')}
           ${campo('E-mail', '<input name="t_email" type="email">')}
-          ${campo('Telefone', '<input name="t_fone">')}
+          ${campo('Telefone', '<input name="t_fone" data-mask="fone" inputmode="tel">')}
           ${campo('CEP', `<div class="input-group"><input name="t_cep" data-mask="cep"><button type="button" class="btn sm" id="btnCep" title="Buscar CEP">${icon('search')}</button></div>`)}
           ${campo('Logradouro', '<input name="t_logradouro">', { cls: 'span2' })}
           ${campo('Número', '<input name="t_numero">')}
@@ -81,7 +82,7 @@ export async function paginaEmitir(view, params) {
       <div class="section-title"><span class="n">3</span><h2>Serviço prestado</h2></div>
       <div class="grid g4">
         ${campo('Código de Tributação Nacional (cTribNac)', '<input id="ctribBusca" placeholder="Ex.: 01.01.01 ou “desenvolvimento”"><input type="hidden" name="ctribnac">', { cls: 'span3', req: true, hint: '<span id="ctribDesc"></span>' })}
-        ${campo('Cód. Tributação Municipal', `<input name="ctribmun" list="dlMun" maxlength="3" placeholder="3 dígitos"><datalist id="dlMun">${codMun.map(m => `<option value="${m.ctribmun}">${esc(m.ctribnac)} - ${esc(m.descricao)}</option>`).join('')}</datalist>`, { hint: 'Opcional / conforme município' })}
+        ${campo('Cód. Tributação Municipal', '<input name="ctribmun" maxlength="3" inputmode="numeric" placeholder="3 dígitos" autocomplete="off">', { hint: 'Opcional / conforme município' })}
         ${campo('Código NBS', '<input id="nbsBusca" placeholder="Digite código ou descrição"><input type="hidden" name="cnbs">', { cls: 'span3', hint: '<span id="nbsDesc"></span>' })}
         ${campo('Local da prestação', `<input id="locNome" value="${esc(c.municipio)}"><input type="hidden" name="local_prestacao" value="${c.cod_municipio}">`)}
         <div class="full" id="sugBox"></div>
@@ -95,10 +96,10 @@ export async function paginaEmitir(view, params) {
     <div class="card">
       <div class="section-title"><span class="n">4</span><h2>Valores e tributação</h2></div>
       <div class="grid g4">
-        ${campo('Valor do serviço (R$)', '<input type="number" step="0.01" min="0" name="valor_servico" required>', { req: true })}
-        ${campo('Desconto incondicionado', '<input type="number" step="0.01" min="0" name="desconto_incond">')}
-        ${campo('Desconto condicionado', '<input type="number" step="0.01" min="0" name="desconto_cond">')}
-        ${campo('Dedução/redução da BC', '<div class="input-group"><select name="deducao_tipo"><option value="">Nenhuma</option><option value="valor">R$</option><option value="percentual">%</option></select><input type="number" step="0.01" min="0" name="deducao_valor"></div>')}
+        ${campo('Valor do serviço (R$)', '<input type="text" inputmode="numeric" data-mask="moeda" placeholder="R$ 0,00" name="valor_servico" required>', { req: true })}
+        ${campo('Desconto incondicionado', '<input type="text" inputmode="numeric" data-mask="moeda" placeholder="R$ 0,00" name="desconto_incond">')}
+        ${campo('Desconto condicionado', '<input type="text" inputmode="numeric" data-mask="moeda" placeholder="R$ 0,00" name="desconto_cond">')}
+        ${campo('Dedução/redução da BC', '<div class="input-group"><select name="deducao_tipo"><option value="">Nenhuma</option><option value="valor">R$</option><option value="percentual">%</option></select><input type="text" inputmode="numeric" data-mask="moeda" data-mask-tipo="deducao_tipo" name="deducao_valor"></div>')}
       </div>
       <h3 style="margin:18px 0 10px">ISSQN</h3>
       <div class="grid g4">
@@ -119,7 +120,7 @@ export async function paginaEmitir(view, params) {
           <div class="btns" style="align-self:end;padding-bottom:8px"><label class="check"><input type="checkbox" name="ret_pis"> PIS retido</label><label class="check"><input type="checkbox" name="ret_cofins"> COFINS retida</label></div>
         </div>
         <div class="grid g3" style="margin-top:12px">
-          ${['irrf:IRRF', 'csll:CSLL', 'inss:INSS / CP'].map(x => { const [k, l] = x.split(':'); return campo(`Retenção ${l}`, `<div class="input-group"><input type="number" step="0.01" min="0" name="ret_${k}"><select name="ret_${k}_tipo" style="max-width:80px"><option value="v">R$</option><option value="p">%</option></select></div>`); }).join('')}
+          ${['irrf:IRRF', 'csll:CSLL', 'inss:INSS / CP'].map(x => { const [k, l] = x.split(':'); return campo(`Retenção ${l}`, `<div class="input-group"><input type="text" inputmode="numeric" data-mask="moeda" data-mask-tipo="ret_${k}_tipo" name="ret_${k}"><select name="ret_${k}_tipo" style="max-width:80px"><option value="v">R$</option><option value="p">%</option></select></div>`); }).join('')}
         </div>
       </div>
     </div>
@@ -200,7 +201,8 @@ export async function paginaEmitir(view, params) {
     $('#sugBox').innerHTML = s.correlacao.length ? `<div class="alert info">${icon('info')}<div style="flex:1"><b class="t">Sugestões da tabela de correlação oficial (Anexo VIII)</b> — clique para aplicar NBS, cIndOp e cClassTrib:
       <div class="btns" style="margin-top:8px">${s.correlacao.slice(0, 8).map((r, i) => `<button type="button" class="btn sm" data-sug="${i}" title="${esc(r.descNbs)}">${fmtNBS(r.cNBS)} · ${esc(r.descNbs.slice(0, 48))}${r.descNbs.length > 48 ? '…' : ''}</button>`).join('')}</div></div></div>` : '';
     $$('[data-sug]').forEach(b => b.onclick = () => aplicarSug(sugestoesCache[+b.dataset.sug]));
-    const lista = codMun.filter(m => m.ctribnac === codigo);
+    await carregarOpcoesMun();
+    const lista = opcoesMun.filter(m => m.ctribnac === codigo);
     if (lista.length === 1 && !form.ctribmun.value) form.ctribmun.value = lista[0].ctribmun;
     recalc();
   };
@@ -211,10 +213,34 @@ export async function paginaEmitir(view, params) {
     $('#nbsDesc').textContent = r.localIncidIBS ? `Local de incidência IBS/CBS: ${r.localIncidIBS}` : '';
     recalc();
   };
+  // cTribNac: digitação com busca por código/descrição ou seta para ver a lista completa da Lista Nacional
   autocomplete($('#ctribBusca'), {
-    buscar: async q => (await get(`/api/tabelas/ctribnac?q=${encodeURIComponent(q)}&limite=40`)).itens,
+    seta: true, min: 1,
+    buscar: async (q, { todos } = {}) => (await get(`/api/tabelas/ctribnac?q=${encodeURIComponent(todos ? '' : q)}&limite=${todos ? 1000 : 60}`)).itens,
     render: it => `<b>${fmtCTrib(it.codigo)}</b>${esc(it.descricao)}`,
     escolher: it => setCtrib(it.codigo, it.descricao),
+  });
+  // cTribMun: códigos do município (tabela local/Sefin), favoritos e usados em notas; aceita digitação livre
+  let opcoesMun = null;
+  const carregarOpcoesMun = async () => (opcoesMun = await get(`/api/codigos-municipais/opcoes?contribuinte_id=${c.id}&ctribnac=${form.ctribnac.value || ''}`));
+  autocomplete(form.ctribmun, {
+    seta: true, min: 1, vazio: 'Nenhum código municipal cadastrado para este município. Digite o código ou consulte a Sefin.',
+    buscar: async (q, { todos } = {}) => {
+      const l = opcoesMun || await carregarOpcoesMun();
+      const t = todos ? '' : q.toLowerCase();
+      return l.filter(o => !t || o.ctribmun.includes(t) || o.ctribnac.includes(so(t) || '¬') || o.descricao.toLowerCase().includes(t) || o.servico.toLowerCase().includes(t)).slice(0, 300);
+    },
+    render: o => `<b>${esc(o.ctribmun)}</b>${o.ctribnac === form.ctribnac.value ? '' : `<span class="muted">${fmtCTrib(o.ctribnac)} · </span>`}${esc(o.descricao || o.servico)} <span class="badge plain">${esc(o.origem)}</span>${o.aliquota != null && o.aliquota !== '' ? ` <span class="muted small">${pct(o.aliquota)}</span>` : ''}`,
+    escolher: o => { form.ctribmun.value = o.ctribmun; if (o.aliquota != null && o.aliquota !== '' && !form.aliq_iss.value) form.aliq_iss.value = o.aliquota; recalc(); },
+    rodape: () => (c.ambiente !== 'simulacao' && form.ctribnac.value ? [{ html: `Consultar códigos municipais de ${fmtCTrib(form.ctribnac.value)} na Sefin…`, acao: async () => {
+      try {
+        await get(`/api/parametros-municipais?contribuinte_id=${c.id}&servico=${form.ctribnac.value}`);
+        await carregarOpcoesMun();
+        const n = opcoesMun.filter(o => o.ctribnac === form.ctribnac.value).length;
+        toast(n ? `${n} código(s) municipal(is) disponível(is).` : 'O município não informou códigos municipais para este serviço.', n ? 'ok' : undefined);
+        form.ctribmun.focus();
+      } catch (e) { toast(e.message, 'error'); }
+    } }] : []),
   });
   autocomplete($('#nbsBusca'), {
     buscar: async q => {
@@ -256,11 +282,8 @@ export async function paginaEmitir(view, params) {
   // ---------- Consultas CNPJ / CEP ----------
   $('#btnCnpj').onclick = async () => {
     try {
-      const d = await get(`/api/consulta/cnpj/${so(form.t_documento.value)}`);
-      preencherForm(form, { t_nome: d.nome, t_cep: d.cep, t_logradouro: d.logradouro, t_numero: d.numero, t_complemento: d.complemento, t_bairro: d.bairro, t_cod_municipio: d.cod_municipio, t_email: d.email || form.t_email.value });
-      const m = (await get(`/api/tabelas/municipios?q=${d.cod_municipio}`)).itens[0];
-      if (m) $('#tMunNome').value = `${m.nome}/${m.uf}`;
-      toast(`CNPJ encontrado: ${d.nome}${d.simples ? ' (optante do Simples)' : ''}`, 'ok');
+      await preencherPelaReceita(form, form.t_documento.value, { prefixo: 't_', campoMun: $('#tMunNome'), extra: () => ({}) });
+      recalc();
     } catch (e) { toast(e.message, 'error'); }
   };
   $('#btnCep').onclick = async () => {

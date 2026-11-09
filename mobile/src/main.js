@@ -46,8 +46,8 @@ async function iniciar() {
   let chave = await kv('get', 'chave-mestra');
   if (!chave) { chave = randomBytes(32); await kv('put', 'chave-mestra', chave); }
 
-  const http = async ({ url, method = 'GET', headers = {}, body, pfx, senha, publico }) => {
-    const r = await Nativo.http({ url, method, headers, body: body ? b64(new TextEncoder().encode(body)) : null, pfx: pfx ? b64(pfx) : null, senha: senha || '', publico: !!publico });
+  const http = async ({ url, method = 'GET', headers = {}, body, pfx, senha, publico, certSistema }) => {
+    const r = await Nativo.http({ url, method, headers, body: body ? b64(new TextEncoder().encode(body)) : null, pfx: pfx ? b64(pfx) : null, senha: senha || '', publico: !!publico, alias: certSistema || null });
     return { status: r.status, headers: r.headers || {}, body: unb64(r.body || '') };
   };
 
@@ -55,6 +55,12 @@ async function iniciar() {
     nome: 'Android', versao: __VERSAO__, db: adaptarSqlJs(raw, agendar), cofre: criarCofre(new Uint8Array(chave)), http,
     exportarBanco: () => raw.export(),
     gerarPdf: async html => unb64((await Nativo.pdf({ html })).base64 || ''),
+    // Certificados instalados no aparelho (KeyChain): o Android mostra o seletor e libera o certificado ao app
+    certSistema: {
+      escolhaNativa: true,
+      listar: async () => { const r = await Nativo.escolherCertificado(); return r?.id ? [{ id: r.id, der: unb64(r.der) }] : []; },
+      assinar: async (alias, dados, alg) => unb64((await Nativo.assinarKeychain({ alias, dados: b64(dados), alg })).assinatura),
+    },
   });
   globalThis.__vorticisApi = api;
 }

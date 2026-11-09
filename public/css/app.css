@@ -211,3 +211,21 @@ pre.xml { background: var(--surface-2); border: 1px solid var(--border); border-
 
 .lote-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px; background: var(--primary-soft, rgba(37,99,235,.08)); }
 th.sel, td.sel { width: 34px; text-align: center; }
+
+.cert-lista { display: grid; gap: 8px; margin-top: 8px; }
+.cert-item { display: flex; gap: 12px; align-items: center; text-align: left; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card, transparent); color: var(--text); cursor: pointer; font: inherit; }
+.cert-item:hover:not(:disabled) { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+.cert-item:disabled { opacity: .55; cursor: not-allowed; }
+.cert-item .ci-ic { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: rgba(37,99,235,.1); color: var(--primary); flex: none; }
+.cert-item .ci-tx { display: grid; gap: 2px; min-width: 0; }
+.neg { color: var(--danger, #dc2626); }
+
+.ac-combo { position: relative; }
+.ac-caixa { position: relative; display: block; }
+.ac-caixa > input { width: 100%; padding-right: 38px; }
+.ac-seta { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.ac-seta:hover { background: var(--primary-soft); color: var(--primary); }
+.ac-aberto .ac-seta svg { transform: rotate(180deg); }
+.ac-list .ac-vazio { color: var(--muted); cursor: default; }
+.ac-list .ac-acao { color: var(--primary); font-weight: 600; }
+.ac-caixa > .ac-list { min-width: min(440px, 88vw); left: auto; }

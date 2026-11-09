@@ -27,25 +27,8 @@ function lerOtherNames(cert) {
 
 const binario = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return s; };
 
-/** Lê um PFX/P12 (Uint8Array) e extrai titular, CPF/CNPJ ICP-Brasil, validade e chaves em PEM. */
-export function lerPfx(pfxBytes, senha) {
-  let p12;
-  try {
-    const asn = forge.asn1.fromDer(forge.util.createBuffer(binario(pfxBytes)));
-    p12 = forge.pkcs12.pkcs12FromAsn1(asn, false, senha);
-  } catch (e) {
-    throw erro('Não foi possível abrir o certificado: senha incorreta ou arquivo inválido.');
-  }
-  const keyBag = (p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] || [])[0]
-    || (p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag] || [])[0];
-  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
-  if (!keyBag || !certBags.length) throw erro('Certificado sem chave privada.');
-  const key = keyBag.key;
-  // certificado do titular = o que corresponde à chave privada
-  const pubPem = forge.pki.publicKeyToPem(forge.pki.setRsaPublicKey(key.n, key.e));
-  const leaf = certBags.find(b => forge.pki.publicKeyToPem(b.cert.publicKey) === pubPem)?.cert || certBags[0].cert;
-  const chain = certBags.map(b => b.cert).filter(c => c !== leaf);
-
+/** Dados do titular (CPF/CNPJ ICP-Brasil, validade, emissor, cadeia) a partir do certificado. */
+function infoCert(leaf, chain = []) {
   const cn = leaf.subject.getField('CN')?.value || '';
   const other = lerOtherNames(leaf);
   let documento = '', tipo_doc = '';
@@ -66,9 +49,50 @@ export function lerPfx(pfxBytes, senha) {
     serial: leaf.serialNumber,
     valido_de: leaf.validity.notBefore.toISOString(),
     valido_ate: leaf.validity.notAfter.toISOString(),
-    keyPem: forge.pki.privateKeyToPem(key),
     certPem: forge.pki.certificateToPem(leaf),
     chainPem: chain.map(c => forge.pki.certificateToPem(c)),
+  };
+}
+
+/** Lê um certificado X.509 em DER (Uint8Array) – usado para certificados instalados no sistema (sem acesso à chave). */
+export function lerCertificadoDer(der, cadeiaDer = []) {
+  let leaf;
+  try { leaf = forge.pki.certificateFromAsn1(forge.asn1.fromDer(forge.util.createBuffer(binario(der)))); }
+  catch { throw erro('Certificado do sistema em formato não reconhecido.'); }
+  const chain = [];
+  for (const d of cadeiaDer) { try { chain.push(forge.pki.certificateFromAsn1(forge.asn1.fromDer(forge.util.createBuffer(binario(d))))); } catch { /* ignora */ } }
+  return infoCert(leaf, chain);
+}
+
+/** Confere uma assinatura RSA PKCS#1 v1.5 (SHA-256) feita pela chave do certificado – prova de posse no login. */
+export function conferirAssinatura(certPem, dados, assinatura) {
+  try {
+    const cert = forge.pki.certificateFromPem(certPem);
+    const md = forge.md.sha256.create(); md.update(binario(dados));
+    return cert.publicKey.verify(md.digest().getBytes(), binario(assinatura));
+  } catch { return false; }
+}
+/** Lê um PFX/P12 (Uint8Array) e extrai titular, CPF/CNPJ ICP-Brasil, validade e chaves em PEM. */
+export function lerPfx(pfxBytes, senha) {
+  let p12;
+  try {
+    const asn = forge.asn1.fromDer(forge.util.createBuffer(binario(pfxBytes)));
+    p12 = forge.pkcs12.pkcs12FromAsn1(asn, false, senha);
+  } catch (e) {
+    throw erro('Não foi possível abrir o certificado: senha incorreta ou arquivo inválido.');
+  }
+  const keyBag = (p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] || [])[0]
+    || (p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag] || [])[0];
+  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
+  if (!keyBag || !certBags.length) throw erro('Certificado sem chave privada.');
+  const key = keyBag.key;
+  // certificado do titular = o que corresponde à chave privada
+  const pubPem = forge.pki.publicKeyToPem(forge.pki.setRsaPublicKey(key.n, key.e));
+  const leaf = certBags.find(b => forge.pki.publicKeyToPem(b.cert.publicKey) === pubPem)?.cert || certBags[0].cert;
+  const chain = certBags.map(b => b.cert).filter(c => c !== leaf);
+
+  return { ...infoCert(leaf, chain),
+    keyPem: forge.pki.privateKeyToPem(key),
   };
 }
 
@@ -77,6 +101,7 @@ export function resumoCert(row) {
   return {
     id: row.id, apelido: row.apelido, titular: row.titular, documento: row.documento, tipo_doc: row.tipo_doc,
     emissor: row.emissor, valido_de: row.valido_de, valido_ate: row.valido_ate, dias_restantes: dias,
+    origem: row.origem || 'arquivo',
     situacao: dias < 0 ? 'vencido' : dias <= 30 ? 'vencendo' : 'valido',
     cadeia: (() => { try { return JSON.parse(row.cadeia || '{}'); } catch { return {}; } })(),
   };

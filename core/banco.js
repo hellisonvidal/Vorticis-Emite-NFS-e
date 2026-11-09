@@ -137,6 +137,9 @@ const MIGRACOES = [
   ['procuracoes', 'sistemas', 'TEXT'],
   ['procuracoes', 'verificada_em', 'TEXT'],
   ['procuracoes', 'fonte_validade', "TEXT DEFAULT 'manual'"],
+  ['certificados', 'origem', "TEXT DEFAULT 'arquivo'"],   // arquivo (.pfx) | sistema (repositório Windows/Android)
+  ['certificados', 'ref_sistema', 'TEXT'],                   // impressão digital (Windows) ou alias (Android)
+  ['certificados', 'cert_pem', 'TEXT'],
 ];
 
 export function iniciarBanco(db) {

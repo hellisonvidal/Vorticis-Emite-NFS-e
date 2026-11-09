@@ -10,11 +10,11 @@ export async function paginaCertificados(view) {
   view.innerHTML = `
   <div class="page-head"><div><h1>Certificados e procurações</h1><p>Certificados A1 ICP-Brasil (armazenados criptografados) e procurações eletrônicas para emitir em nome de terceiros</p></div></div>
   <div class="card">
-    <div class="card-head"><h2>${icon('key', 'style="width:18px"')} Certificados digitais</h2><button class="btn primary" id="btnCert">${icon('plus')}Adicionar certificado A1</button></div>
+    <div class="card-head"><h2>${icon('key', 'style="width:18px"')} Certificados digitais</h2><div class="btns"><button class="btn" id="btnSis" title="Certificados do repositório do Windows ou do Android, inclusive token/cartão A3 no Windows">${icon('shield')}Usar certificado instalado</button><button class="btn primary" id="btnCert">${icon('plus')}Adicionar arquivo A1 (.pfx)</button></div></div>
     ${certs.length ? `<div class="table-wrap"><table><thead><tr><th>Apelido / Titular</th><th>Documento</th><th>Emissor</th><th>Validade</th><th>Situação</th><th>Cadeia ICP-Brasil</th><th></th></tr></thead><tbody>
-      ${certs.map(c => `<tr><td><b>${esc(c.apelido || c.titular)}</b><div class="small muted">${esc(c.titular)}</div></td><td>${esc(c.tipo_doc)} ${fmtDoc(c.documento, c.tipo_doc)}</td><td class="small">${esc(c.emissor)}</td>
+      ${certs.map(c => `<tr><td><b>${esc(c.apelido || c.titular)}</b><div class="small muted">${esc(c.titular)}</div><div class="small">${c.origem === 'sistema' ? '<span class="badge b-info">instalado no sistema</span>' : '<span class="badge plain">arquivo .pfx</span>'}</div></td><td>${esc(c.tipo_doc)} ${fmtDoc(c.documento, c.tipo_doc)}</td><td class="small">${esc(c.emissor)}</td>
         <td>${dataBR(c.valido_ate)}<div class="small muted">${c.dias_restantes >= 0 ? `${c.dias_restantes} dias` : 'expirado'}</div></td><td>${badge(c.situacao, SIT)}</td>
-        <td>${c.cadeia?.completa ? `<span class="badge b-ok">completa</span><div class="small muted">${c.cadeia.niveis} nível(is)${c.cadeia.complementada ? ' · baixada via AIA' : ''}</div>` : `<span class="badge b-erro">incompleta</span><div class="small muted">${esc(c.cadeia?.aviso || 'o ADN pode recusar a conexão')}</div>`}</td>
+        <td>${c.origem === 'sistema' ? '<span class="badge b-ok">pelo sistema</span><div class="small muted">gerenciada pelo Windows/Android</div>' : c.cadeia?.completa ? `<span class="badge b-ok">completa</span><div class="small muted">${c.cadeia.niveis} nível(is)${c.cadeia.complementada ? ' · baixada via AIA' : ''}</div>` : `<span class="badge b-erro">incompleta</span><div class="small muted">${esc(c.cadeia?.aviso || 'o ADN pode recusar a conexão')}</div>`}</td>
         <td class="nowrap">${c.cadeia?.completa ? '' : `<button class="btn sm" data-cad="${c.id}" title="Baixar ACs intermediárias pelo endereço AIA do certificado">${icon('refresh')}Completar cadeia</button>`}<button class="btn sm ghost danger" data-del="${c.id}">${icon('trash')}</button></td></tr>`).join('')}</tbody></table></div>`
       : vazio('Nenhum certificado cadastrado. Sem certificado é possível emitir apenas em modo simulação.', 'key')}
     <div class="alert info" style="margin-top:14px">${icon('info')}<div class="small"><b class="t">Como funciona:</b> a API da Sefin Nacional exige autenticação mútua TLS com certificado ICP-Brasil e assinatura XML da DPS. O certificado pode ser da própria empresa (e-CNPJ) ou de um procurador (e-CPF/e-CNPJ) com procuração eletrônica válida para NFS-e. Login com usuário e senha dá acesso a este sistema; a transmissão sempre usa um certificado.</div></div>
@@ -33,6 +33,19 @@ export async function paginaCertificados(view) {
     <div class="alert warn" style="margin-top:14px">${icon('alert')}<div class="small"><b class="t">Importante:</b> a procuração precisa estar registrada oficialmente (Procuração Eletrônica no e-CAC/Sistema Nacional NFS-e) com o serviço de NFS-e. Aqui você apenas vincula o certificado do procurador à empresa outorgante para assinar e transmitir.</div></div>
   </div>`;
 
+  $('#btnSis').onclick = async () => {
+    let r;
+    try { r = await get('/api/certificados/sistema'); } catch (e) { return toast(e.message, 'error'); }
+    if (!r.suportado) return toast(r.erro || 'Certificados instalados podem ser usados no aplicativo Windows ou Android. No navegador, use o arquivo .pfx.', 'error');
+    const importar = async id => { const c = await post('/api/certificados/sistema', { id }); toast(`Certificado de ${c.titular} vinculado.`, 'ok'); paginaCertificados(view); };
+    if (r.escolhaNativa) { try { await importar(null); } catch (e) { toast(e.message, 'error'); } return; }
+    await modal({ titulo: 'Certificados instalados neste computador', wide: true, corpo: r.certificados.length ? `<p class="small muted" style="margin-top:0">Repositório pessoal do Windows. A chave privada continua no Windows: o app pede ao sistema para assinar e para autenticar na Sefin. Se for token ou cartão (A3), o Windows pedirá o PIN.</p>
+      <div class="cert-lista">${r.certificados.map(c => `<button type="button" class="cert-item" data-sid="${esc(c.id)}" ${c.vencido || !c.documento ? 'disabled' : ''}><span class="ci-ic">${icon('key')}</span><span class="ci-tx"><b>${esc(c.titular)}</b>
+        <span class="small muted">${c.documento ? `${c.tipo_doc} ${fmtDoc(c.documento)}` : 'sem CPF/CNPJ ICP-Brasil'} · ${esc(c.emissor)}</span><span class="small ${c.vencido ? 'neg' : 'muted'}">${c.vencido ? 'Vencido em' : 'Válido até'} ${dataBR(c.valido_ate.slice(0, 10))}</span></span></button>`).join('')}</div>`
+      : `<div class="alert warn">${icon('alert')}<div class="small">Nenhum certificado com chave privada no repositório do Windows. Instale o certificado (duplo clique no arquivo .pfx) ou adicione o arquivo diretamente.</div></div>`,
+      botoes: [{ texto: 'Fechar', valor: true }],
+      onOpen: bg => $$('[data-sid]', bg).forEach(b => b.onclick = async () => { b.disabled = true; try { await importar(b.dataset.sid); bg.remove(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } }) });
+  };
   $('#btnCert').onclick = () => modal({
     titulo: 'Adicionar certificado A1', corpo: `<div class="grid">
       ${campo('Arquivo (.pfx / .p12)', '<input type="file" id="arq" accept=".pfx,.p12">', { req: true })}
