@@ -4,10 +4,10 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import forge from 'node-forge';
-import { listar, assinar } from '../../desktop/repositorio-windows.js';
+import { listar, assinar, ambientePowershell } from '../../desktop/repositorio-windows.js';
 import { lerCertificadoDer, conferirAssinatura } from '../../core/certificado.js';
 
-const ps = cmd => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { encoding: 'utf8' }).trim();
+const ps = cmd => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Import-Module Microsoft.PowerShell.Security, PKI -ErrorAction Stop; ' + cmd], { encoding: 'utf8', env: ambientePowershell() }).trim();
 const criados = [];
 const criar = (cn, provedor) => {
   const t = ps(`(New-SelfSignedCertificate -Subject 'CN=${cn}' -CertStoreLocation Cert:\\CurrentUser\\My -KeyExportPolicy NonExportable -KeyAlgorithm RSA -KeyLength 2048 -Provider '${provedor}' -NotAfter (Get-Date).AddDays(2)).Thumbprint`);

@@ -6,9 +6,18 @@ import { execFile } from 'node:child_process';
 const PS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command'];
 export const THUMB = /^[0-9A-F]{40}$/i;
 
+// O Windows PowerShell 5.1 não carrega o provedor "Cert:" se herdar o PSModulePath do PowerShell 7
+// (ex.: app aberto a partir do pwsh): o processo filho recebe o ambiente sem essa variável.
+export function ambientePowershell(extra = {}) {
+  const env = { ...process.env, ...extra };
+  for (const k of Object.keys(env)) if (k.toUpperCase() === 'PSMODULEPATH') delete env[k];
+  return env;
+}
+const PREAMBULO = "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop\n";
+
 function powershell(script, env = {}) {
   return new Promise((resolve, reject) => {
-    execFile('powershell.exe', [...PS, script], { env: { ...process.env, ...env }, windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
+    execFile('powershell.exe', [...PS, PREAMBULO + script], { env: ambientePowershell(env), windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 120000 }, (err, stdout, stderr) => {
       if (err) return reject(new Error((String(stderr || '').split(/\r?\n/).find(l => l.trim() && !l.startsWith('At ') && !l.startsWith('+')) || err.message).trim()));
       resolve(String(stdout).trim());
     });
