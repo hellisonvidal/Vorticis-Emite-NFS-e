@@ -1,4 +1,5 @@
 import { get, post, del, baixarArquivo } from '../api.js';
+import { escolherXmls } from '../govbr.js';
 import { botoesDanfse, imprimirDanfse, baixarDanfse, danfseDeXml, paginaPrevia } from '../danfse.js';
 import { $, $$, esc, icon, moeda, pct, badge, dataBR, dataHoraBR, fmtDoc, fmtCTrib, fmtNBS, fmtChave, modal, toast, confirmar, vazio, STATUS, AMB, formatarXml, num } from '../ui.js';
 import { estado } from '../estado.js';
@@ -12,7 +13,7 @@ export async function paginaNotas(view, params) {
   let pagina = 0;
   view.innerHTML = `
   <div class="page-head"><div><h1>Notas emitidas</h1><p>Consulta de NFS-e, rascunhos e rejeições</p></div>
-    <div class="btns"><button class="btn" id="btnXmlDanfse" title="Gerar DANFSe de qualquer XML de NFS-e">${icon('printer')}DANFSe de XML</button><button class="btn" id="btnCsv">${icon('download')}Exportar CSV</button><a class="btn primary" href="#/emitir">${icon('plus')}Nova NFS-e</a></div></div>
+    <div class="btns"><button class="btn" id="btnImpXml" title="Importar NFS-e emitidas no Emissor Nacional (gov.br) ou recebidas em XML">${icon('download')}Importar XML</button><button class="btn" id="btnXmlDanfse" title="Gerar DANFSe de qualquer XML de NFS-e">${icon('printer')}DANFSe de XML</button><button class="btn" id="btnCsv">${icon('download')}Exportar CSV</button><a class="btn primary" href="#/emitir">${icon('plus')}Nova NFS-e</a></div></div>
   <div class="card">
     <form id="fFiltro" class="grid g6" style="align-items:end">
       <label class="f span2"><span>Buscar</span><input name="q" value="${esc(f.q)}" placeholder="Nº, chave, tomador, descrição…"></label>
@@ -68,6 +69,8 @@ export async function paginaNotas(view, params) {
   $('#loteBaixar').onclick = () => baixarDanfse(reqLote()).catch(e => toast(e.message, 'error'));
   $('#loteLimpar').onclick = () => { selecionadas.clear(); $$('[data-sel]').forEach(cb => { cb.checked = false; }); if ($('#selTodas')) $('#selTodas').checked = false; barra(); };
   $('#btnXmlDanfse').onclick = () => danfseDeXml();
+  $('#btnImpXml').onclick = () => escolherXmls('arquivo');
+  addEventListener('vorticis:notas-importadas', () => carregar(), { once: true });
   $('#fFiltro').onsubmit = e => { e.preventDefault(); pagina = 0; carregar(); };
   $('#btnLimpar').onclick = () => { $('#fFiltro').reset(); $$('#fFiltro input').forEach(i => { i.value = ''; }); pagina = 0; carregar(); };
   $('#ant').onclick = () => { pagina--; carregar(); };

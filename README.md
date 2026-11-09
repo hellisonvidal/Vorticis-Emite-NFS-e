@@ -16,7 +16,19 @@ Nas três versões, a interface e as regras fiscais são as mesmas: o núcleo do
   - login com usuário e senha (a conta é criada na própria aba "Usuário e senha"), ou com certificado digital;
   - **certificados já instalados no computador ou no celular**: repositório pessoal do Windows (inclusive chaves não exportáveis e token/cartão A3, com o PIN pedido pelo Windows) e certificados instalados no Android (KeyChain). A chave privada não sai do sistema: a assinatura da DPS e a conexão segura com a Sefin são feitas pelo próprio Windows/Android;
   - ou o arquivo A1 (`.pfx`), guardado com criptografia AES-256-GCM;
-  - várias **procurações eletrônicas** por empresa, cada uma com vigência e escopo; na emissão você escolhe qual certificado ou procuração usar.
+  - várias **procurações eletrônicas** por empresa, cada uma com vigência e escopo.
+- **Emitir em nome da empresa (representação, vigente desde 01/11/2026 — Guia do Emissor Nacional v1.3, item 11):** em "Emitir como" você escolhe:
+  - o **certificado da empresa**;
+  - o **responsável legal** (e-CPF do representante no cadastro CNPJ). Em *Empresas → Representação*, "Identificar" encontra o CPF pelo e-CNPJ da empresa (o certificado ICP-Brasil traz o CPF do responsável) e pelo quadro societário da Receita;
+  - um **estabelecimento da mesma raiz de CNPJ** (o e-CNPJ da matriz emite pelas filiais);
+  - um **procurador** com procuração eletrônica do serviço NFS-e.
+
+  A Sefin confere o vínculo pelo certificado da conexão e pela assinatura. Cancelamento e consulta usam o mesmo certificado que emitiu a nota.
+- **Conta gov.br:** a conta gov.br (prata/ouro) é aceita apenas no **Emissor Nacional web**; as APIs exigem certificado. O botão "Emitir pelo gov.br" abre o Emissor Nacional e um assistente com os dados da nota para copiar:
+  - **no Windows**, o Emissor abre numa janela do app com o login salvo, e o **XML baixado é importado automaticamente**;
+  - **no navegador e no Android**, o Emissor abre no navegador e você usa "Importar XML" em Notas emitidas.
+
+  No Emissor, use "Procuração/Representação" para atuar como responsável legal ou procurador.
 - **Regimes:** MEI, Simples Nacional ME/EPP (incluindo sublimite excedido), Lucro Presumido, Real e Arbitrado, Imune e Isenta, além de regimes especiais de ISS.
 - **Tributos:**
   - ISS próprio ou retido;
@@ -108,6 +120,7 @@ core/        núcleo compartilhado (roda no Node e no WebView do Android)
   data/        tabelas oficiais convertidas (gov.br/nfse)
 server/      servidor HTTP local (Express) usado no Windows e no navegador
 desktop/     processo principal do Electron (janela, menu, downloads, PDF, confirmação ao fechar)
+  emissor-govbr.js         Emissor Nacional (gov.br) em janela própria e importação do XML baixado
   repositorio-windows.js   certificados do Windows via PowerShell/.NET (listar e assinar)
   certificados-windows.js  TLS com certificado do Windows pela pilha de rede do Chromium
 mobile/      app Android (Capacitor)

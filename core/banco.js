@@ -140,6 +140,9 @@ const MIGRACOES = [
   ['certificados', 'origem', "TEXT DEFAULT 'arquivo'"],   // arquivo (.pfx) | sistema (repositório Windows/Android)
   ['certificados', 'ref_sistema', 'TEXT'],                   // impressão digital (Windows) ou alias (Android)
   ['certificados', 'cert_pem', 'TEXT'],
+  ['contribuintes', 'responsavel_cpf', 'TEXT'],     // responsável legal no cadastro CNPJ (representação pela base CNPJ)
+  ['contribuintes', 'responsavel_nome', 'TEXT'],
+  ['contribuintes', 'responsavel_fonte', 'TEXT'],
 ];
 
 export function iniciarBanco(db) {

@@ -3,6 +3,7 @@
 import { app, BrowserWindow, Menu, shell, dialog } from 'electron';
 import path from 'node:path';
 import { certSistemaWindows } from './certificados-windows.js';
+import { ehEmissor, abrirEmissor } from './emissor-govbr.js';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,8 @@ function criarJanela() {
   // Links externos no navegador padrão; PDFs (DANFSe) e prévias em janela própria
   janela.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith(base) || url.startsWith('blob:')) return { action: 'allow', overrideBrowserWindowOptions: { width: 1000, height: 800, title: NOME, autoHideMenuBar: true } };
+    // Emissor Nacional (conta gov.br): janela própria com sessão persistente e importação do XML baixado
+    if (ehEmissor(url)) { abrirEmissor(url, () => janela); return { action: 'deny' }; }
     shell.openExternal(url);
     return { action: 'deny' };
   });

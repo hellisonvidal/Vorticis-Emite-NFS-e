@@ -177,6 +177,53 @@ export function criarApi(P) {
     if (q) rows = buscar(rows, q, ['ctribnac', 'ctribmun', 'descricao']).itens;
     return rows.map(r => ({ ...r, municipio: nomeMunicipio(r.cod_municipio), servico: CTRIB.get(r.ctribnac)?.descricao || '' }));
   });
+  // ---- Responsável legal (representação pela base CNPJ)
+  GET('/api/contribuintes/:id/acessos', ({ user, params }) => acessosContrib(user.id, contribuinte(user.id, params.id)));
+  /** Identifica o responsável legal: e-CNPJ da empresa (o certificado ICP-Brasil traz o CPF do responsável) e QSA da Receita. */
+  GET('/api/contribuintes/:id/responsavel', async ({ user, params }) => {
+    const c = contribuinte(user.id, params.id);
+    const candidatos = [];
+    const add = o => { if (!candidatos.some(x => x.cpf && x.cpf === o.cpf && x.fonte === o.fonte)) candidatos.push(o); };
+    const ecpfs = certsValidos(user.id).filter(r => r.tipo_doc === 'CPF');
+    // 1) e-CNPJ da própria empresa ou da mesma raiz: campo ICP-Brasil "responsável" (OID 2.16.76.1.3.4)
+    for (const r of certsValidos(user.id).filter(x => x.tipo_doc === 'CNPJ' && x.documento.slice(0, 8) === String(c.documento).slice(0, 8))) {
+      try {
+        const info = r.origem === 'sistema' ? lerCertificadoDer(unb64(r.cert_pem.replace(/-----[^-]+-----|\s/g, '')))
+          : lerPfx(await P.cofre.decrypt(r.pfx_enc, true), await P.cofre.decrypt(r.senha_enc));
+        if (info.responsavelCpf && /^\d{11}$/.test(info.responsavelCpf)) {
+          const ec = ecpfs.find(x => x.documento === info.responsavelCpf);
+          add({ cpf: info.responsavelCpf, nome: ec?.titular || '', fonte: `e-CNPJ ${fmtDocTxt(r.documento)} (ICP-Brasil)`, certificado_id: ec?.id || null, confiavel: true });
+        }
+      } catch { /* ignora */ }
+    }
+    // 2) QSA da Receita (CPF mascarado): confere nome e dígitos centrais com os e-CPF cadastrados
+    let qsa = [];
+    if (c.tipo_doc === 'CNPJ') {
+      const d = await obterJson(`https://brasilapi.com.br/api/cnpj/v1/${c.documento}`) || await obterJson(`https://minhareceita.org/${c.documento}`);
+      const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+      qsa = (d?.qsa || []).filter(q => /\*\*\*\d{6}\*\*/.test(q.cnpj_cpf_do_socio || '')).map(q => ({ nome: q.nome_socio, cpf_mascarado: q.cnpj_cpf_do_socio, qualificacao: q.qualificacao_socio,
+        responsavel: d.qualificacao_do_responsavel != null && +q.codigo_qualificacao_socio === +d.qualificacao_do_responsavel }));
+      for (const q of qsa) {
+        const meio = q.cpf_mascarado.replace(/\D/g, '');
+        const ec = ecpfs.find(x => x.documento.slice(3, 9) === meio && norm(x.titular) === norm(q.nome));
+        if (ec) add({ cpf: ec.documento, nome: ec.titular, fonte: `QSA da Receita: ${q.qualificacao}${q.responsavel ? ' (qualificação do responsável)' : ''}`, certificado_id: ec.id, confiavel: q.responsavel });
+      }
+    }
+    return { atual: c.responsavel_cpf ? { cpf: c.responsavel_cpf, nome: c.responsavel_nome, fonte: c.responsavel_fonte } : null, candidatos, qsa,
+      ecpfs: ecpfs.map(r => ({ id: r.id, cpf: r.documento, nome: r.titular, valido_ate: r.valido_ate })) };
+  });
+  PUT('/api/contribuintes/:id/responsavel', ({ user, params, body }) => {
+    const c = contribuinte(user.id, params.id);
+    if (c.tipo_doc === 'CPF') falha('Representação por responsável legal se aplica a empresas (CNPJ).');
+    const cpf = so(body.cpf);
+    if (cpf && !docValido('CPF', cpf)) falha('CPF do responsável legal inválido.');
+    db.prepare('UPDATE contribuintes SET responsavel_cpf = ?, responsavel_nome = ?, responsavel_fonte = ? WHERE id = ?')
+      .run(cpf || null, cpf ? String(body.nome || '').slice(0, 150) : null, cpf ? String(body.fonte || 'informado manualmente').slice(0, 200) : null, c.id);
+    audit(user.id, 'contribuinte.responsavel', `${c.documento} -> ${cpf || '(removido)'}`);
+    const n = contribuinte(user.id, c.id);
+    return { ok: true, acessos: acessosContrib(user.id, n) };
+  });
+
   // Opções de código de tributação municipal para a emissão: tabela do município (inclusive importada da Sefin),
   // serviços favoritos e códigos já usados em notas da empresa – os do cTribNac escolhido primeiro.
   GET('/api/codigos-municipais/opcoes', ({ user, query: { contribuinte_id, ctribnac } }) => {
@@ -311,7 +358,7 @@ export function criarApi(P) {
   function exibirContrib(c) {
     const cert = c.certificado_id ? db.prepare('SELECT * FROM certificados WHERE id = ?').get(c.certificado_id) : null;
     const procs = db.prepare('SELECT p.*, c.titular, c.valido_ate cert_validade FROM procuracoes p JOIN certificados c ON c.id = p.certificado_id WHERE p.contribuinte_id = ? ORDER BY p.id').all(c.id);
-    return { ...c, config: json(c.config), municipio: nomeMunicipio(c.cod_municipio), regime_label: REGIMES[c.regime]?.label, certificado: cert ? resumoCert(cert) : null, procuracoes: procs };
+    return { ...c, config: json(c.config), municipio: nomeMunicipio(c.cod_municipio), regime_label: REGIMES[c.regime]?.label, certificado: cert ? resumoCert(cert) : null, procuracoes: procs, acessos: acessosContrib(c.usuario_id, c) };
   }
   function normalizarContrib(b) {
     const o = {};
@@ -379,7 +426,42 @@ export function criarApi(P) {
   DEL('/api/procuracoes/:id', ({ user, params }) => { db.prepare('DELETE FROM procuracoes WHERE id = ? AND usuario_id = ?').run(params.id, user.id); return { ok: true }; });
 
   // Certificado a usar: próprio da empresa ou de procurador (uma entre várias procurações)
-  async function credencial(uid, c, procuracaoId, escopo = 'emissao') {
+  // Representação perante a Sefin/ADN (Guia do Emissor Nacional v1.3, item 11 – vigente desde 01/11/2026): além da
+  // procuração eletrônica (serviço NFS-e no Portal de Serviços da RFB), a base CNPJ autoriza o RESPONSÁVEL LEGAL (e-CPF)
+  // e estabelecimentos da MESMA RAIZ de CNPJ (e-CNPJ). A Sefin valida pelo certificado da conexão e pela assinatura.
+  const VIAS = { certificado: 'certificado da empresa', raiz: 'e-CNPJ da mesma raiz de CNPJ', responsavel: 'responsável legal (e-CPF)', procuracao: 'procuração eletrônica', simulacao: 'simulação' };
+  function vinculoCert(c, row) {
+    if (!row) return null;
+    if (row.documento === c.documento) return 'certificado';
+    if (c.tipo_doc !== 'CPF' && row.tipo_doc === 'CNPJ' && row.documento.slice(0, 8) === String(c.documento).slice(0, 8)) return 'raiz';
+    if (row.tipo_doc === 'CPF' && c.responsavel_cpf && row.documento === c.responsavel_cpf) return 'responsavel';
+    return null;
+  }
+  const certsValidos = uid => db.prepare('SELECT * FROM certificados WHERE usuario_id = ? AND valido_ate > ? ORDER BY valido_ate DESC').all(uid, new Date().toISOString());
+  /** Opções de acesso (assinatura/transmissão) da empresa: vínculos da base CNPJ e procurações. */
+  function acessosContrib(uid, c) {
+    const out = [];
+    const vistos = new Set();
+    const ordem = { certificado: 0, raiz: 1, responsavel: 2 };
+    const certs = certsValidos(uid).map(r => ({ r, via: vinculoCert(c, r) || (r.id === c.certificado_id ? 'certificado' : null) })).filter(x => x.via).sort((a, b) => ordem[a.via] - ordem[b.via] || (b.r.id === c.certificado_id) - (a.r.id === c.certificado_id));
+    for (const { r, via } of certs) {
+      if (vistos.has(r.id)) continue; vistos.add(r.id);
+      out.push({ valor: `c:${r.id}`, via, certificado_id: r.id, rotulo: `${via === 'responsavel' ? 'Responsável legal' : via === 'raiz' ? 'Mesma raiz de CNPJ' : 'Certificado da empresa'}: ${r.apelido || r.titular} — ${r.tipo_doc} ${r.documento}`, valido_ate: r.valido_ate });
+    }
+    const hoje = new Date().toISOString().slice(0, 10);
+    for (const p of db.prepare('SELECT p.*, ce.titular, ce.documento cert_doc, ce.valido_ate cert_validade FROM procuracoes p JOIN certificados ce ON ce.id = p.certificado_id WHERE p.contribuinte_id = ? AND p.usuario_id = ? AND p.ativo = 1').all(c.id, uid)) {
+      if (p.valida_ate && p.valida_ate < hoje) continue;
+      out.push({ valor: `p:${p.id}`, via: 'procuracao', procuracao_id: p.id, certificado_id: p.certificado_id, rotulo: `Procurador: ${p.titular} — ${p.cert_doc}${p.valida_ate ? ` (procuração até ${p.valida_ate.split('-').reverse().join('/')})` : ''}`, valido_ate: p.cert_validade });
+    }
+    return out;
+  }
+  async function credencial(uid, c, procuracaoId, escopo = 'emissao', certificadoId = null) {
+    if (!procuracaoId && certificadoId) {
+      const row = db.prepare('SELECT * FROM certificados WHERE id = ? AND usuario_id = ?').get(certificadoId, uid);
+      const via = vinculoCert(c, row) || (row && row.id === c.certificado_id ? 'certificado' : null);
+      if (!via) falha('Este certificado não tem vínculo com a empresa na base CNPJ (não é dela, de estabelecimento da mesma raiz nem do responsável legal). Cadastre uma procuração eletrônica ou o responsável legal.');
+      return { cert: await carregarCertificado(row.id, uid), via };
+    }
     if (procuracaoId) {
       const p = db.prepare('SELECT * FROM procuracoes WHERE id = ? AND contribuinte_id = ? AND usuario_id = ?').get(procuracaoId, c.id, uid);
       if (!p || !p.ativo) falha('Procuração não encontrada ou inativa.');
@@ -389,9 +471,13 @@ export function criarApi(P) {
       if (!String(p.escopo).includes(escopo)) falha(`A procuração não contempla a operação "${escopo}".`);
       return { cert: await carregarCertificado(p.certificado_id, uid), via: 'procuracao', procuracao: p };
     }
-    if (c.certificado_id) return { cert: await carregarCertificado(c.certificado_id, uid), via: 'certificado' };
-    const own = db.prepare('SELECT id FROM certificados WHERE usuario_id = ? AND documento = ? ORDER BY valido_ate DESC').get(uid, c.documento);
-    if (own) return { cert: await carregarCertificado(own.id, uid), via: 'certificado' };
+    if (c.certificado_id) {
+      const row = db.prepare('SELECT * FROM certificados WHERE id = ?').get(c.certificado_id);
+      return { cert: await carregarCertificado(c.certificado_id, uid), via: vinculoCert(c, row) || 'certificado' };
+    }
+    // automático: certificado da própria empresa → mesma raiz → responsável legal → procuração
+    const auto = acessosContrib(uid, c).find(a => a.via !== 'procuracao');
+    if (auto) return { cert: await carregarCertificado(auto.certificado_id, uid), via: auto.via };
     const proc = db.prepare('SELECT id FROM procuracoes WHERE contribuinte_id = ? AND ativo = 1 ORDER BY id').get(c.id);
     if (proc) return credencial(uid, c, proc.id, escopo);
     return { cert: null, via: 'simulacao' };
@@ -596,7 +682,7 @@ export function criarApi(P) {
     const acesso = body.acesso || {};
     const simulacao = c.ambiente === 'simulacao';
     let cred = { cert: null, via: 'simulacao' };
-    try { cred = await credencial(uid, c, acesso.procuracao_id); } catch (e) { if (!simulacao) throw e; }
+    try { cred = await credencial(uid, c, acesso.procuracao_id, 'emissao', acesso.certificado_id); } catch (e) { if (!simulacao) throw e; }
     if (!simulacao && !cred.cert) falha('Para emitir em homologação/produção é necessário um certificado digital A1 do emitente ou de um procurador com procuração cadastrada.');
 
     // Reserva o número da DPS. Em homologação/produção confirma na Sefin (HEAD /dps/{id}) que o número
@@ -780,7 +866,7 @@ export function criarApi(P) {
     const n = nota(user.id, params.id);
     if (n.ambiente === 'simulacao') falha('Notas simuladas não existem na Sefin.');
     const c = contribuinte(user.id, n.contribuinte_id);
-    const cred = await credencial(user.id, c, n.procuracao_id, 'consulta');
+    const cred = await credencial(user.id, c, n.procuracao_id, 'consulta', n.certificado_id);
     let chave = n.chave_acesso;
     if (!chave && n.id_dps) {
       const d = await sefin.consultarDPS(n.ambiente, cred.cert, n.id_dps);
@@ -812,7 +898,7 @@ export function criarApi(P) {
     let ok, resposta, xmlAss = xml;
     if (n.ambiente === 'simulacao') { ok = true; resposta = { simulacao: true }; }
     else {
-      const cred = await credencial(uid, c, body.procuracao_id || n.procuracao_id, 'cancelamento');
+      const cred = await credencial(uid, c, body.procuracao_id || n.procuracao_id, 'cancelamento', body.procuracao_id ? null : n.certificado_id);
       xmlAss = await assinarXml(xml, 'infPedReg', cred.cert, json(c.config).assinatura);
       const r = await sefin.registrarEvento(n.ambiente, cred.cert, n.chave_acesso, xmlAss);
       ok = r.ok; resposta = r.ok ? r.bruto : { erros: r.erros };
@@ -942,6 +1028,62 @@ export function criarApi(P) {
   });
 
   // Importa do ADN (distribuição por NSU) as NFS-e do CNPJ, inclusive as emitidas fora do app (ex.: Emissor Web)
+  /** Grava (ou completa) uma NFS-e autorizada vinda de fora do app: ADN, Emissor Nacional (gov.br) ou arquivo. */
+  function registrarNFSe(uid, c, xml, x, { origem, via, ambiente, msg }) {
+    const ex = db.prepare('SELECT id, status FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(uid, x.chave);
+    if (ex) {
+      db.prepare("UPDATE notas SET xml_nfse = COALESCE(xml_nfse, ?), nnfse = COALESCE(nnfse, ?), atualizado_em = datetime('now') WHERE id = ?").run(xml, x.nNFSe, ex.id);
+      return 'atualizada';
+    }
+    const retido = x.tpRetISSQN && x.tpRetISSQN !== '1';
+    db.prepare(`INSERT INTO notas (usuario_id, contribuinte_id, status, ambiente, serie, ndps, id_dps, chave_acesso, nnfse, dh_emi, competencia, dh_proc, tomador_doc, tomador_nome,
+      ctribnac, cnbs, descricao, valor_servico, valor_desconto_incond, base_calculo, aliq_iss, valor_iss, iss_retido, valor_pis, valor_cofins, valor_irrf, valor_csll, valor_inss,
+      valor_retencoes, valor_liquido, valor_ibs, valor_cbs, emitido_via, origem, dados, xml_nfse, mensagens)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      uid, c.id, 'autorizada', ambiente, String(x.serie || '').padStart(5, '0'), +x.nDPS || null, x.idDps, x.chave, x.nNFSe, x.dhEmi, x.dCompet, x.dhProc,
+      x.tomaDoc, x.tomaNome, x.cTribNac, x.cNBS, x.xDescServ, x.vServ, x.vDescIncond, x.vBC, x.pAliq, x.vISSQN, retido ? 1 : 0, x.vPis, x.vCofins, x.vIRRF, x.vCSLL, x.vCP,
+      x.vTotalRet, x.vLiq, x.vIBS, x.vCBS, via, origem,
+      JSON.stringify({ form: { competencia: x.dCompet, ctribnac: x.cTribNac, cnbs: x.cNBS, descricao: x.xDescServ, valor_servico: x.vServ, trib_issqn: '1', tp_ret_issqn: x.tpRetISSQN || '1', aliq_iss: x.pAliq },
+        tomador: x.tomaDoc ? { tipo_doc: x.tomaTipo, documento: x.tomaDoc, nome: x.tomaNome } : null }),
+      xml, JSON.stringify([{ codigo: origem.toUpperCase(), descricao: msg }]));
+    return 'importada';
+  }
+
+  // NFS-e emitidas no Emissor Nacional (login gov.br, como responsável legal ou procurador) ou recebidas em arquivo:
+  // importa os XML baixados para relatórios, DANFSe, cópia da última nota e cancelamento/consulta posteriores.
+  POST('/api/notas/importar-xml', ({ user, body }) => {
+    const lista = (Array.isArray(body.xmls) ? body.xmls : [body.xml]).filter(Boolean).slice(0, 500);
+    if (!lista.length) falha('Selecione ao menos um XML de NFS-e.');
+    const via = ['govbr', 'portal', 'arquivo'].includes(body.via) ? body.via : 'arquivo';
+    const res = { importadas: 0, atualizadas: 0, eventos: 0, erros: [], notas: [] };
+    lista.forEach((bruto, i) => {
+      try {
+        let xml = String(bruto).replace(/^\uFEFF/, '').trim();
+        if (!xml.startsWith('<')) xml = decodificarXml(xml);
+        if (/e101101|e105102/.test(xml) && !/<(\w+:)?NFSe[\s>]/.test(xml)) {
+          const ch = (xml.match(/<chNFSe>(\d{50})<\/chNFSe>/) || [])[1];
+          const u = ch ? db.prepare('UPDATE notas SET status = ? WHERE usuario_id = ? AND chave_acesso = ?').run(/e105102/.test(xml) ? 'substituida' : 'cancelada', user.id, ch) : { changes: 0 };
+          if (u.changes) res.eventos++; else res.erros.push({ arquivo: i + 1, erro: 'Evento de uma NFS-e que não está no app: importe primeiro a nota.' });
+          return;
+        }
+        const x = resumoNFSe(xml);
+        const doc = so(x.prestDoc || x.emitDoc);
+        const c = db.prepare('SELECT * FROM contribuintes WHERE usuario_id = ? AND documento = ?').get(user.id, doc)
+          || db.prepare('SELECT * FROM contribuintes WHERE usuario_id = ? AND documento = ?').get(user.id, so(x.emitDoc));
+        if (!c) { res.erros.push({ arquivo: i + 1, erro: `Prestador ${fmtDocTxt(doc)} não está cadastrado em Empresas emitentes.` }); return; }
+        const ambiente = x.tpAmb === '1' ? 'producao' : 'homologacao';
+        const r = registrarNFSe(user.id, c, xml, x, { origem: via === 'arquivo' ? 'arquivo' : 'portal', via, ambiente,
+          msg: via === 'arquivo' ? 'Importada de arquivo XML.' : 'Emitida no Emissor Nacional (acesso gov.br) e importada pelo app.' });
+        if (x.chSubstda) db.prepare("UPDATE notas SET status = 'substituida' WHERE usuario_id = ? AND chave_acesso = ?").run(user.id, x.chSubstda);
+        aprenderIM(user.id, xml);
+        res[r === 'atualizada' ? 'atualizadas' : 'importadas']++;
+        res.notas.push({ id: db.prepare('SELECT id FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(user.id, x.chave).id, nnfse: x.nNFSe, empresa: c.razao_social, chave: x.chave });
+      } catch (e) { res.erros.push({ arquivo: i + 1, erro: e.message }); }
+    });
+    audit(user.id, 'notas.importar-xml', `${via}: ${res.importadas} novas, ${res.atualizadas} atualizadas, ${res.eventos} eventos`);
+    return res;
+  });
+
   POST('/api/contribuintes/:id/importar-adn', async ({ user, params, body }) => {
     const c = contribuinte(user.id, params.id);
     if (c.ambiente === 'simulacao') falha('Importação do ADN disponível apenas em Produção restrita ou Produção.');
@@ -962,24 +1104,8 @@ export function criarApi(P) {
           if (/<(\w+:)?NFSe[\s>]/.test(d.xml)) {
             const x = resumoNFSe(d.xml);
             if (so(x.prestDoc || x.emitDoc) !== so(c.documento)) { res.ignoradas++; continue; }
-            const ex = db.prepare('SELECT id, status FROM notas WHERE usuario_id = ? AND chave_acesso = ?').get(user.id, x.chave);
-            if (ex) {
-              db.prepare("UPDATE notas SET xml_nfse = COALESCE(xml_nfse, ?), nnfse = COALESCE(nnfse, ?), atualizado_em = datetime('now') WHERE id = ?").run(d.xml, x.nNFSe, ex.id);
-              res.atualizadas++;
-            } else {
-              const retido = x.tpRetISSQN && x.tpRetISSQN !== '1';
-              db.prepare(`INSERT INTO notas (usuario_id, contribuinte_id, status, ambiente, serie, ndps, id_dps, chave_acesso, nnfse, dh_emi, competencia, dh_proc, tomador_doc, tomador_nome,
-                ctribnac, cnbs, descricao, valor_servico, valor_desconto_incond, base_calculo, aliq_iss, valor_iss, iss_retido, valor_pis, valor_cofins, valor_irrf, valor_csll, valor_inss,
-                valor_retencoes, valor_liquido, valor_ibs, valor_cbs, emitido_via, origem, dados, xml_nfse, mensagens)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-                user.id, c.id, x.chSubstda ? 'autorizada' : 'autorizada', c.ambiente, x.serie.padStart(5, '0'), +x.nDPS || null, x.idDps, x.chave, x.nNFSe, x.dhEmi, x.dCompet, x.dhProc,
-                x.tomaDoc, x.tomaNome, x.cTribNac, x.cNBS, x.xDescServ, x.vServ, x.vDescIncond, x.vBC, x.pAliq, x.vISSQN, retido ? 1 : 0, x.vPis, x.vCofins, x.vIRRF, x.vCSLL, x.vCP,
-                x.vTotalRet, x.vLiq, x.vIBS, x.vCBS, 'adn', 'adn',
-                JSON.stringify({ form: { competencia: x.dCompet, ctribnac: x.cTribNac, cnbs: x.cNBS, descricao: x.xDescServ, valor_servico: x.vServ, trib_issqn: '1', tp_ret_issqn: x.tpRetISSQN || '1', aliq_iss: x.pAliq },
-                  tomador: x.tomaDoc ? { tipo_doc: x.tomaTipo, documento: x.tomaDoc, nome: x.tomaNome } : null }),
-                d.xml, JSON.stringify([{ codigo: 'ADN', descricao: 'Importada da distribuição do Ambiente de Dados Nacional (ADN).' }]));
-              res.importadas++;
-            }
+            if (registrarNFSe(user.id, c, d.xml, x, { origem: 'adn', via: 'adn', ambiente: c.ambiente, msg: 'Importada da distribuição do Ambiente de Dados Nacional (ADN).' }) === 'atualizada') res.atualizadas++;
+            else res.importadas++;
             if (x.chSubstda) db.prepare("UPDATE notas SET status = 'substituida' WHERE usuario_id = ? AND chave_acesso = ?").run(user.id, x.chSubstda);
             aprenderIM(user.id, d.xml);
             // Mantém a numeração à frente do maior nº de DPS encontrado nesta série
@@ -1029,12 +1155,17 @@ export function criarApi(P) {
     // Certificado / acesso
     let cred = null;
     try { cred = await credencial(user.id, c, query.procuracao_id || null, 'emissao'); } catch (e) { add('Certificado', 'Certificado para assinatura/transmissão', 'erro', e.message); }
-    if (cred && !cred.cert) add('Certificado', 'Certificado para assinatura/transmissão', 'erro', 'Nenhum certificado A1 vinculado (próprio ou procuração). Certificados A3 (token/cartão) não são suportados.');
+    if (cred && !cred.cert) add('Certificado', 'Certificado para assinatura/transmissão', 'erro', 'Nenhum certificado vinculado: da empresa, de estabelecimento da mesma raiz, do responsável legal (e-CPF) ou de procurador com procuração eletrônica.');
     if (cred?.cert) {
       const r = cred.cert.row, rc = resumoCert(r);
       add('Certificado', 'Validade', rc.situacao === 'valido' ? 'ok' : rc.situacao === 'vencendo' ? 'aviso' : 'erro', `${rc.titular} — até ${r.valido_ate.slice(0, 10)} (${rc.dias_restantes} dias)`);
-      add('Certificado', 'Titular', cred.via === 'procuracao' || so(r.documento) === so(c.documento) ? 'ok' : 'aviso',
-        cred.via === 'procuracao' ? `Procurador ${fmtDocTxt(r.documento)} (procuração eletrônica)` : so(r.documento) === so(c.documento) ? 'Certificado do próprio emitente' : `Documento do certificado (${r.documento}) difere do emitente: cadastre como procuração.`);
+      const titular = {
+        procuracao: ['ok', `Procurador ${fmtDocTxt(r.documento)} (procuração eletrônica com o serviço NFS-e)`],
+        certificado: so(r.documento) === so(c.documento) ? ['ok', 'Certificado do próprio emitente'] : ['aviso', `Documento do certificado (${fmtDocTxt(r.documento)}) não tem vínculo identificado com o emitente: cadastre o responsável legal ou uma procuração.`],
+        raiz: ['ok', `e-CNPJ ${fmtDocTxt(r.documento)} da mesma raiz de CNPJ (representação pela base CNPJ)`],
+        responsavel: [c.responsavel_fonte && !/informado/i.test(c.responsavel_fonte) ? 'ok' : 'aviso', `Responsável legal ${fmtDocTxt(r.documento)} (e-CPF). Vínculo: ${c.responsavel_fonte || 'informado manualmente'}. A Sefin confere o vínculo na base CNPJ.`],
+      }[cred.via] || ['info', cred.via];
+      add('Certificado', 'Titular / representação', ...titular);
       const cad = rc.cadeia || {};
       add('Certificado', 'Cadeia ICP-Brasil', cad.completa && cad.icp ? 'ok' : cad.completa ? 'aviso' : 'erro',
         cad.completa ? `${cad.niveis} nível(is) até ${cad.raiz}${cad.icp ? '' : ' (raiz não identificada como ICP-Brasil)'}` : `Cadeia incompleta${cad.aviso ? ': ' + cad.aviso : ''}. Use "Completar cadeia" em Certificados.`);

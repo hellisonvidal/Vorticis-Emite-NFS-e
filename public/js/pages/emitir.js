@@ -1,5 +1,6 @@
 import { get, post, cached, ErroApi } from '../api.js';
 import { preencherPelaReceita } from '../receita.js';
+import { abrirEmissorGovBr } from '../govbr.js';
 import { $, $$, esc, icon, moeda, pct, num, toast, modal, lerForm, preencherForm, campo, opts, mascaras, autocomplete, so, fmtDoc, fmtCTrib, fmtNBS, fmtChave, hoje, formatarXml, AMB, badge, dataBR } from '../ui.js';
 import { estado } from '../estado.js';
 
@@ -17,12 +18,9 @@ export async function paginaEmitir(view, params) {
   const servicos = await get('/api/servicos');
   let tomadorId = null, rascunhoId = null, sugestoesCache = [];
 
-  const procs = c.procuracoes.filter(p => p.ativo);
-  const acessoOpts = [
-    ...(c.certificado ? [[ '', `Certificado da empresa: ${c.certificado.titular} (até ${dataBR(c.certificado.valido_ate)})` ]] : []),
-    ...procs.map(p => [String(p.id), `Procuração: ${p.titular || p.procurador_nome} — ${fmtDoc(p.procurador_doc)}${p.valida_ate ? ` (até ${dataBR(p.valida_ate)})` : ''}`]),
-  ];
-  if (!acessoOpts.length) acessoOpts.push(['', c.ambiente === 'simulacao' ? 'Simulação (sem certificado)' : 'Nenhum certificado vinculado']);
+  // Emitir como: certificado da empresa, e-CNPJ da mesma raiz, responsável legal (e-CPF) ou procurador
+  const acessoOpts = (c.acessos || []).map(a => [a.valor, a.rotulo]);
+  if (!acessoOpts.length) acessoOpts.push(['', c.ambiente === 'simulacao' ? 'Simulação (sem certificado)' : 'Nenhum certificado vinculado — veja Empresas → Representação']);
 
   view.innerHTML = `
   <div class="page-head"><div><h1>Emitir NFS-e</h1><p>${esc(c.razao_social)} · ${fmtDoc(c.documento)} · ${esc(c.regime_label || '')} · ${badge(c.ambiente, AMB)}</p></div>
@@ -37,7 +35,7 @@ export async function paginaEmitir(view, params) {
     <div class="card">
       <div class="section-title"><span class="n">1</span><h2>Emitente e forma de acesso</h2></div>
       <div class="grid g3">
-        ${campo('Assinar/transmitir com', `<select name="procuracao_id">${acessoOpts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`, { cls: 'span2', hint: 'Certificado próprio do emitente ou de procurador com procuração eletrônica cadastrada.' })}
+        ${campo('Emitir como', `<select name="acesso">${acessoOpts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select>`, { cls: 'span2', hint: 'Empresa, responsável legal (e-CPF), estabelecimento da mesma raiz ou procurador. A emissão pela conta gov.br é feita no Emissor Nacional (botão abaixo).' })}
         ${campo('Competência', `<input type="date" name="competencia" max="${hoje()}" value="${hoje()}" required>`, { req: true })}
       </div>
     </div>
@@ -183,6 +181,7 @@ export async function paginaEmitir(view, params) {
       <div class="grid" style="margin-top:16px">
         <button class="btn primary lg" id="btnEmitir">${icon('send')}${c.ambiente === 'simulacao' ? 'Emitir (simulação)' : 'Emitir NFS-e'}</button>
         <div class="grid g2"><button class="btn" id="btnXml">${icon('file')}Prévia XML</button><button class="btn" id="btnRasc">${icon('save')}Rascunho</button></div>
+        <button class="btn" id="btnGovBr" title="Sem certificado: emitir no Emissor Nacional com a conta gov.br, como responsável legal ou procurador">${icon('shield')}Emitir pelo gov.br (Emissor Nacional)</button>
       </div>
     </div>
   </aside></div>`;
@@ -331,9 +330,9 @@ export async function paginaEmitir(view, params) {
       ...Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith('t_')).map(([k, v]) => [k.slice(2), typeof v === 'boolean' ? +v : v])),
     };
     if (tomador && !tomador.documento && tomador.tipo_doc !== 'SEM' && !tomador.nome) tomador.vazio = true;
-    const f = Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('t_') && !['procuracao_id', 'salvar_tomador'].includes(k)));
+    const f = Object.fromEntries(Object.entries(d).filter(([k]) => !k.startsWith('t_') && !['acesso', 'salvar_tomador'].includes(k)));
     if (d.aliq_cbs !== '') f.ibscbs_aliq = { cbs: d.aliq_cbs, ibsUF: d.aliq_ibsuf || 0, ibsMun: d.aliq_ibsmun || 0 };
-    return { contribuinte_id: c.id, tomador: tomador?.vazio ? null : tomador, salvar_tomador: d.salvar_tomador, form: f, acesso: { procuracao_id: d.procuracao_id || null },
+    return { contribuinte_id: c.id, tomador: tomador?.vazio ? null : tomador, salvar_tomador: d.salvar_tomador, form: f, acesso: { procuracao_id: d.acesso?.startsWith('p:') ? +d.acesso.slice(2) : null, certificado_id: d.acesso?.startsWith('c:') ? +d.acesso.slice(2) : null },
       substituir: d.subst_chave ? { chave: so(d.subst_chave), motivo: d.subst_motivo, xMotivo: d.subst_xmotivo } : undefined, rascunho_id: rascunhoId };
   }
 
@@ -393,7 +392,8 @@ export async function paginaEmitir(view, params) {
     if (f.local_prestacao) get(`/api/tabelas/municipios?q=${f.local_prestacao}`).then(r => { const m = r.itens[0]; if (m) $('#locNome').value = `${m.nome}/${m.uf}`; });
     if (dados.tomador) setTomador({ ...dados.tomador, municipio: '' });
     if (dados.tomador?.cod_municipio) get(`/api/tabelas/municipios?q=${dados.tomador.cod_municipio}`).then(r => { const m = r.itens[0]; if (m) $('#tMunNome').value = `${m.nome}/${m.uf}`; });
-    if (dados.acesso?.procuracao_id) form.procuracao_id.value = dados.acesso.procuracao_id;
+    const ac = dados.acesso?.procuracao_id ? `p:${dados.acesso.procuracao_id}` : dados.acesso?.certificado_id ? `c:${dados.acesso.certificado_id}` : '';
+    if (ac && [...form.acesso.options].some(o => o.value === ac)) form.acesso.value = ac;
     $('#semTomador').checked = !dados.tomador;
     atualizarVisibilidade(); aplicarRedSeVazio(f); recalc();
     $('#descCount').textContent = form.descricao.value.length;
@@ -440,6 +440,12 @@ export async function paginaEmitir(view, params) {
       const r = await post('/api/notas/previa-xml', { contribuinte_id: c.id, form: p.form, tomador: p.tomador });
       modal({ titulo: `Prévia da DPS ${r.id}`, wide: true, corpo: `${r.erros.length ? `<div class="alert warn" style="margin-bottom:12px">${icon('alert')}<ul>${r.erros.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : `<div class="alert ok" style="margin-bottom:12px">${icon('check')}<div>Validações locais OK. A assinatura digital é aplicada no envio.</div></div>`}<pre class="xml">${esc(formatarXml(r.xml))}</pre>`, botoes: [{ texto: 'Fechar' }] });
     } catch (e) { toast(e.message, 'error'); }
+  };
+  $('#btnGovBr').onclick = async () => {
+    const p = payload();
+    let k = null;
+    try { if (p.form.valor_servico) k = (await post('/api/notas/calcular', { contribuinte_id: c.id, form: p.form })).calc; } catch { /* sem cálculo */ }
+    abrirEmissorGovBr(c, p, k);
   };
   $('#btnRasc').onclick = async () => {
     try { const r = await post('/api/notas/rascunho', { ...payload(), id: rascunhoId }); rascunhoId = r.id; toast('Rascunho salvo.', 'ok'); } catch (e) { toast(e.message, 'error'); }
